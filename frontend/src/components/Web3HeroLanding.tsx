@@ -510,7 +510,7 @@ export default function Web3HeroLanding({ onLaunch, onStartSimulation, walletCon
       label: "GitHub",
       description: "Fintrix source code and contribution guide",
       icon: ExternalLink,
-      action: () => window.open("https://github.com", "_blank"),
+      action: () => window.open("https://github.com/vaibhavi-0320/StellerFund", "_blank"),
       external: true,
     },
     {

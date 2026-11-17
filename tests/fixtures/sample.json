@@ -1,0 +1,25 @@
+{
+  "invoiceNumber": "INV-2026-0417",
+  "issueDate": "2026-11-02",
+  "dueDate": "2027-01-31",
+  "issuer": "Northwind Components Ltd",
+  "recipient": "Contoso Retail Group",
+  "currency": "USD",
+  "lines": [
+    {
+      "description": "Steel brackets (box of 50)",
+      "qty": 40,
+      "unit": 18.5,
+      "amount": 740
+    },
+    {
+      "description": "Assembly service hours",
+      "qty": 12,
+      "unit": 45,
+      "amount": 540
+    }
+  ],
+  "subtotal": 1280,
+  "tax": 102.4,
+  "total": 1382.4
+}

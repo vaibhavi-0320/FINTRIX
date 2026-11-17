@@ -1,5 +1,7 @@
 # User Feedback and Iteration Log
 
+> Historical record for the previous version of Fintrix (before the November 2026 rebuild). Some items described here, such as fallback mock marketplace data, were removed in the rebuild: the app now shows only real or clearly labelled demo data.
+
 ## Objective
 
 Capture real-user product feedback and ensure at least one meaningful iteration is implemented and documented.

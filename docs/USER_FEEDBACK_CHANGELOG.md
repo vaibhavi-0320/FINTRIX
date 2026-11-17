@@ -1,5 +1,7 @@
 # User Feedback Changelog
 
+> Historical record for the previous version of Fintrix (before the November 2026 rebuild). Some items described here, such as fallback mock marketplace data, were removed in the rebuild: the app now shows only real or clearly labelled demo data.
+
 ## Applied changes
 
 - reorganized repository into `frontend` and `contract`

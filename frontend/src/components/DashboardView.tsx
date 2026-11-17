@@ -1,10 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Upload, Cpu, Compass, TrendingUp, ArrowRight } from "lucide-react";
-import { getAddress } from "@stellar/freighter-api";
-import * as StellarSdk from "@stellar/stellar-sdk";
 import type { Invoice } from "../types";
 import { useViewport } from "../hooks/useViewport";
-import { getUserStorageKey, safeStorage } from "../utils/storage";
+import { getAccountBalance, getTransactions } from "../services/stellarService";
 import { SkeletonDashboard } from "./PageSkeletons";
 import { usePageSkeleton } from "../hooks/usePageSkeleton";
 
@@ -64,10 +62,6 @@ function getPortfolioApy(item: PortfolioEntry) {
   return Number(item.APY ?? item.apy ?? 0);
 }
 
-function getSimulationTime(item: SimulationEntry) {
-  return item.createdAt || item.simulatedAt || new Date().toISOString();
-}
-
 function getChartHeights(portfolio: PortfolioEntry[], simulations: SimulationEntry[]) {
   const values = [
     ...portfolio.slice(0, 6).map((item) => Number(item.amountUSD || 0)),
@@ -75,7 +69,8 @@ function getChartHeights(portfolio: PortfolioEntry[], simulations: SimulationEnt
   ].filter((value) => value > 0);
 
   if (!values.length) {
-    return [18, 24, 30, 40, 52, 48, 62, 55, 70, 80];
+    // No investments yet: flat baseline instead of invented chart data.
+    return Array.from({ length: 10 }, () => 6);
   }
 
   const max = Math.max(...values, 1);
@@ -111,77 +106,64 @@ export default function DashboardView({
   useEffect(() => {
     async function loadUserData() {
       try {
-        const addressResult = await getAddress().catch(() => ({ address: wallet || "" }));
-        const address = addressResult?.address || wallet || "";
+        const address = wallet || "";
         if (!address) {
-          setWalletStats({
-            xlmBalance: "0",
-            totalInvested: 0,
-            activeDeals: 0,
-            simulationsRun: 0,
-            totalReturn: 0,
-            activity: [],
-            portfolio: [],
-            simulations: [],
-          });
+          setWalletStats({ xlmBalance: "0", totalInvested: 0, activeDeals: 0, simulationsRun: 0, totalReturn: 0, activity: [], portfolio: [], simulations: [] });
           return;
         }
 
-        const server = new StellarSdk.Horizon.Server("https://horizon-testnet.stellar.org");
-        let xlmBalance = "0";
-        try {
-          const account = await server.loadAccount(address);
-          const native = account.balances.find((balance: any) => balance.asset_type === "native");
-          xlmBalance = native ? parseFloat(native.balance).toFixed(2) : "0";
-        } catch {
-          xlmBalance = "0";
-        }
+        const [balance, transactions] = await Promise.all([getAccountBalance().catch(() => 0), getTransactions().catch(() => [])]);
 
-        let portfolio = safeStorage.get<PortfolioEntry[]>(getUserStorageKey(address, "portfolio"), []);
-        
-        // Fix 1: Seed portfolio with existing simulation deals that are funded/active
-        if (portfolio.length === 0 && invoices && invoices.length > 0) {
-          const fundedDeals = invoices.filter((inv: any) => Number(inv.funded || 0) > 0);
-          portfolio = fundedDeals.map((inv: any) => ({
-            txHash: `seed-${inv.id}`,
+        // Investments this wallet actually funded on-chain.
+        const portfolio: PortfolioEntry[] = invoices
+          .filter((inv) => inv.dto?.viewer.isInvestor)
+          .map((inv) => ({
+            txHash: inv.txHash ?? "",
+            explorerUrl: inv.dto?.chain.lastTxUrl ?? undefined,
             invoiceId: inv.id,
-            company: inv.buyer || inv.companyName || "Unknown",
-            amountUSD: Number(inv.funded || inv.amount || 0),
-            amountXLM: Number(inv.funded || inv.amount || 0) / 0.11,
-            APY: Number(inv.yield || 0),
-            fundedAt: new Date().toISOString(),
-            maturityDate: inv.due || null,
-            status: "active"
+            company: inv.buyer,
+            amountUSD: inv.dto?.terms.price ?? inv.amount,
+            amountXLM: Number(inv.dto?.terms.priceAmount ?? 0),
+            APY: inv.yield,
+            fundedAt: inv.dto?.timestamps.fundedAt ?? new Date().toISOString(),
+            maturityDate: inv.due,
+            status: inv.status,
           }));
-        }
+        const active = portfolio.filter((item) => ["funded", "defaulted", "repaid"].includes(String(item.status)));
 
-        const simulations = safeStorage.get<SimulationEntry[]>(getUserStorageKey(address, "simulations"), []);
-        const activity = safeStorage.get<ActivityEntry[]>(getUserStorageKey(address, "activity"), []);
+        const confirmed = transactions.filter((tx) => tx.status === "success");
+        const simulations: SimulationEntry[] = confirmed
+          .filter((tx) => tx.kind === "simulation" && tx.simulation)
+          .map((tx) => ({
+            simId: `SIM-${tx.hash.slice(0, 10).toUpperCase()}`,
+            company: tx.simulation?.company ?? "",
+            amountUSD: Number(tx.simulation?.amountUSD ?? 0),
+            expectedReturn: Number(tx.simulation?.expectedReturn ?? 0),
+            maturityDate: tx.simulation?.maturityDate ?? "",
+            simulatedAt: tx.confirmedAt ?? tx.createdAt,
+          }));
 
-        const totalInvested = portfolio.reduce((sum, item) => sum + Number(item.amountUSD || 0), 0);
-        
-        // Fix 3: Active deals should count all deals with 'active' or 'funding' status from marketplace data
-        const activeDeals = invoices ? invoices.filter(inv => {
-          const s = String(inv.status || "").toLowerCase();
-          return s === "funding open" || s === "funding" || s === "active";
-        }).length : 0;
-        
-        // Fix 4: Load simulations run from localStorage
-        const simCount = parseInt(localStorage.getItem("simulationsRun") || "1", 10);
+        const labels: Record<string, string> = { create: "Listed", fund: "Funded", repay: "Repaid", claim: "Claimed", cancel: "Cancelled", default: "Marked defaulted", simulation: "Simulated" };
+        const activity: ActivityEntry[] = confirmed.map((tx) => ({
+          type: tx.kind,
+          label: `${labels[tx.kind] ?? tx.kind} ${tx.invoiceNumber ?? ""}`.trim(),
+          amount: tx.amount ? `${Number(tx.amount).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${tx.asset ?? "XLM"}` : "—",
+          txHash: tx.hash,
+          timestamp: tx.confirmedAt ?? tx.createdAt,
+        }));
 
-        const totalReturn = portfolio.reduce((sum, item) => {
-          const apy = getPortfolioApy(item);
-          const days = item.fundedAt
-            ? (Date.now() - new Date(item.fundedAt).getTime()) / 86_400_000
-            : 0;
-          return sum + (Number(item.amountUSD || 0) * (apy / 100) * (Math.max(days, 0) / 365));
+        const totalInvested = active.reduce((sum, item) => sum + Number(item.amountUSD || 0), 0);
+        // Return accrued so far on active investments, assuming on-time repayment.
+        const totalReturn = active.reduce((sum, item) => {
+          const days = item.fundedAt ? (Date.now() - new Date(item.fundedAt).getTime()) / 86_400_000 : 0;
+          return sum + Number(item.amountUSD || 0) * (getPortfolioApy(item) / 100) * (Math.max(days, 0) / 365);
         }, 0);
 
         setWalletStats({
-          xlmBalance,
+          xlmBalance: balance.toFixed(2),
           totalInvested,
-          activeDeals,
-          simulationsRun: simCount,
+          activeDeals: active.length,
+          simulationsRun: simulations.length,
           totalReturn,
           activity: activity.slice(0, 5),
           portfolio: portfolio.slice(0, 10),

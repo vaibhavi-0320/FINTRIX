@@ -26,22 +26,9 @@ const QUICK_QUESTIONS = [
   "What returns can I expect?",
 ];
 
-function riskLevel(score?: number) {
-  const value = Number(score || 0);
-  if (value < 40) return "Low";
-  if (value < 65) return "Medium";
-  return "High";
-}
-
-function getDealApy(deal: Invoice) {
-  return Number(deal.yield ?? deal.discount ?? 0);
-}
-
 export function FintrixAssistant({
   view,
   walletAddress,
-  walletBalance,
-  invoices,
   currentDeal,
   notification,
 }: {
@@ -160,24 +147,6 @@ export function FintrixAssistant({
     setQuestion(prompt);
   }
 
-  async function typeAssistantMessage(messageId: string, fullText: string) {
-    const streamId = Date.now();
-    activeStreamRef.current = streamId;
-
-    for (let index = 1; index <= fullText.length; index += 1) {
-      if (!mountedRef.current || activeStreamRef.current !== streamId) {
-        return;
-      }
-
-      const slice = fullText.slice(0, index);
-      setMessages((current) =>
-        current.map((message) => (message.id === messageId ? { ...message, text: slice } : message))
-      );
-
-      await new Promise((resolve) => window.setTimeout(resolve, 20));
-    }
-  }
-
   function buildHistory(nextQuestion: string): AssistantHistoryMessage[] {
     return messages
       .map((message) => ({ role: message.role, text: message.text }))
@@ -201,34 +170,39 @@ export function FintrixAssistant({
     setQuestion("");
     setLoading(true);
 
+    // The answer streams in from the server (Claude + Fintrix knowledge base) into one bubble.
+    const assistantMessageId = `assistant-${Date.now()}`;
+    let started = false;
+    const append = (delta: string) => {
+      if (!mountedRef.current) return;
+      if (!started) {
+        started = true;
+        setLoading(false);
+        setMessages((current) => [...current, { id: assistantMessageId, role: "assistant", text: delta }]);
+        return;
+      }
+      setMessages((current) => current.map((message) => (message.id === assistantMessageId ? { ...message, text: message.text + delta } : message)));
+    };
+
     try {
-      const { answer } = await askFintrixAssistant({
-        question: nextQuestion,
-        view,
-        walletAddress: walletAddress ?? null,
-        history: buildHistory(nextQuestion),
-      });
-
-      const assistantMessageId = `assistant-${Date.now()}`;
-      setLoading(false);
-      setMessages((current) => [
-        ...current,
-        {
-          id: assistantMessageId,
-          role: "assistant",
-          text: "",
-        },
-      ]);
-
-      await typeAssistantMessage(assistantMessageId, answer);
+      const reply = await askFintrixAssistant(
+        { question: nextQuestion, view, invoiceId: currentDeal?.id ?? null, walletAddress: walletAddress ?? null, history: buildHistory(nextQuestion) },
+        append,
+      );
+      if (!started) append(reply.answer || "(No answer returned.)");
+      if (reply.sources.length) {
+        append(`\n\nSources: ${reply.sources.slice(0, 3).map((source) => `[${source.index}] ${source.heading}`).join(" · ")}`);
+      }
     } catch (error) {
-      console.error("Fintrix assistant error:", error);
+      // Show the real failure (e.g. AI not configured) plus the matching help articles. No canned answer.
+      const sources = (error as Error & { sources?: Array<{ index: number; heading: string }> }).sources ?? [];
+      const related = sources.length ? `\n\nRelated help articles: ${sources.slice(0, 3).map((source) => source.heading).join(" · ")}` : "";
       setMessages((current) => [
         ...current,
         {
           id: `assistant-error-${Date.now()}`,
           role: "assistant",
-          text: "Something went wrong. Please try again.",
+          text: `⚠️ ${error instanceof Error ? error.message : "The assistant is unavailable."}${related}`,
         },
       ]);
       setLoading(false);

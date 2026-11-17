@@ -1,0 +1,82 @@
+[
+  {
+    "input": {
+      "totalCents": 148810,
+      "termsDays": 45.0,
+      "priorCount": 13,
+      "priorLateRate": 0.15384615384615385,
+      "priorAvgDaysLate": 1.4615384615384615
+    },
+    "expected": 0.2880395217955134
+  },
+  {
+    "input": {
+      "totalCents": 90266,
+      "termsDays": 60.0,
+      "priorCount": 15,
+      "priorLateRate": 0.2,
+      "priorAvgDaysLate": 2.2
+    },
+    "expected": 0.3162244474452688
+  },
+  {
+    "input": {
+      "totalCents": 134413,
+      "termsDays": 30.0,
+      "priorCount": 15,
+      "priorLateRate": 0.2,
+      "priorAvgDaysLate": 2.2
+    },
+    "expected": 0.2707749361068537
+  },
+  {
+    "input": {
+      "totalCents": 120489,
+      "termsDays": 45.0,
+      "priorCount": 11,
+      "priorLateRate": 0.6363636363636364,
+      "priorAvgDaysLate": 11.818181818181818
+    },
+    "expected": 0.5268020930448831
+  },
+  {
+    "input": {
+      "totalCents": 296890,
+      "termsDays": 30.0,
+      "priorCount": 12,
+      "priorLateRate": 0.5833333333333334,
+      "priorAvgDaysLate": 10.833333333333334
+    },
+    "expected": 0.4989835122406026
+  },
+  {
+    "input": {
+      "totalCents": 140713,
+      "termsDays": 30.0,
+      "priorCount": 12,
+      "priorLateRate": 0.5833333333333334,
+      "priorAvgDaysLate": 10.833333333333334
+    },
+    "expected": 0.47040565139615115
+  },
+  {
+    "input": {
+      "totalCents": 314479,
+      "termsDays": 15.0,
+      "priorCount": 14,
+      "priorLateRate": 0.7142857142857143,
+      "priorAvgDaysLate": 15.571428571428571
+    },
+    "expected": 0.5663347826815016
+  },
+  {
+    "input": {
+      "totalCents": 382878,
+      "termsDays": 30.0,
+      "priorCount": 15,
+      "priorLateRate": 0.7333333333333333,
+      "priorAvgDaysLate": 16.133333333333333
+    },
+    "expected": 0.6185503021011485
+  }
+]

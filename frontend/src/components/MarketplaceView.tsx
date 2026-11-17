@@ -30,7 +30,7 @@ const glassCard: React.CSSProperties = {
   boxShadow: "0 0 20px rgba(255,255,255,0.03)",
 };
 
-export default function MarketplaceView({ invoices, onFund, onViewDetail, sidebarOpen }: MarketplaceViewProps) {
+export default function MarketplaceView({ invoices, onFund: _onFund, onViewDetail, sidebarOpen }: MarketplaceViewProps) {
   const { isMobile, isTablet } = useViewport();
   const loading = usePageSkeleton("marketplace");
   const [statusTab, setStatusTab] = useState<"all" | "active" | "funded" | "repaid">("all");
@@ -51,13 +51,10 @@ export default function MarketplaceView({ invoices, onFund, onViewDetail, sideba
   const simTotal = simAmount + simReturn;
 
   const filtered = useMemo(() => {
-    const base = invoices.length > 0 ? invoices : [
-      { id: "INV-8829-X", buyer: "TechLogistics Ltd", amount: 45000, due: "2024-12-01", status: "active", yield: 12.5, riskScore: 20 },
-      { id: "INV-4412-Q", buyer: "Quantum Global", amount: 12750, due: "2024-11-15", status: "active", yield: 9.2, riskScore: 50 },
-      { id: "INV-9901-S", buyer: "Solaris Networks", amount: 5400, due: "2025-02-01", status: "funded", yield: 10.8, riskScore: 45 },
-    ];
+    // Only invoices that are on-chain (drafts and cancelled listings are not marketplace deals).
+    const base = invoices.filter((inv) => inv.status !== "draft" && inv.status !== "cancelled");
     return base.filter((inv) => {
-      const byStatus = statusTab === "all" || inv.status === statusTab;
+      const byStatus = statusTab === "all" || inv.status === statusTab || (statusTab === "repaid" && inv.status === "settled");
       const byApy = inv.yield >= minApy;
       const riskLevel = inv.riskScore < 40 ? "low" : inv.riskScore < 65 ? "medium" : "high";
       const byRisk = riskFilter === "all" || riskLevel === riskFilter;
@@ -66,14 +63,13 @@ export default function MarketplaceView({ invoices, onFund, onViewDetail, sideba
     });
   }, [invoices, statusTab, minApy, riskFilter, search]);
 
-  const totalVolume = useMemo(() => invoices.reduce((s: number, i: any) => s + i.amount, 0), [invoices]);
+  const totalVolume = useMemo(() => invoices.filter((i) => i.status !== "draft" && i.status !== "cancelled").reduce((s: number, i) => s + i.amount, 0), [invoices]);
 
   if (loading) return <SkeletonMarketplace sidebarOpen={sidebarOpen} />;
 
   const fundingPct = (inv: Invoice) => {
-    if (inv.status === "funded" || inv.status === "repaid") return 100;
-    if (inv.status === "active") return Math.floor(15 + (inv.riskScore * 0.5));
-    return 0;
+    // Invoices are funded in full by one investor, so funding is 0% or 100%.
+    return ["funded", "repaid", "settled", "defaulted"].includes(inv.status) ? 100 : 0;
   };
 
   return (
@@ -156,7 +152,7 @@ export default function MarketplaceView({ invoices, onFund, onViewDetail, sideba
           <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
             {filtered.length === 0 ? (
               <div style={{ ...glassCard, borderRadius: "1rem", padding: "4rem", textAlign: "center" }}>
-                <p style={{ color: "rgba(255,255,255,0.4)", fontSize: "1rem" }}>No invoices match your filters.</p>
+                <p style={{ color: "rgba(255,255,255,0.4)", fontSize: "1rem" }}>{invoices.some((inv) => inv.status !== "draft") ? "No invoices match your filters." : "No invoices are listed yet. List one from Simulation → Upload Invoice."}</p>
               </div>
             ) : filtered.map((inv, idx) => {
               const pct = fundingPct(inv);

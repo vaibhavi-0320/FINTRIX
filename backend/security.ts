@@ -1,77 +1,61 @@
 import cors from "cors";
 import helmet from "helmet";
-import * as Sentry from "@sentry/node";
 import pinoHttp from "pino-http";
-import type { Express, NextFunction, Request, Response } from "express";
-import { clerkMiddleware } from "@clerk/express";
-import { getAllowedOrigins, getEnv } from "./env.ts";
-import { logger } from "./logger.ts";
+import type { Express } from "express";
+import { getConfig } from "./config";
+import { logger } from "./logger";
 
+/**
+ * Baseline HTTP hardening: proxy trust, request logging without bodies, security
+ * headers and a strict CORS allow-list. Authentication lives in http/middleware.ts.
+ */
 export function configureSecurity(app: Express) {
-  const env = getEnv();
-  const allowedOrigins = getAllowedOrigins();
-
-  if (env.SENTRY_DSN) {
-    Sentry.init({ dsn: env.SENTRY_DSN, environment: env.NODE_ENV });
-  }
+  const config = getConfig();
 
   app.disable("x-powered-by");
-  app.set("trust proxy", 1);
+  // Only trust X-Forwarded-For when a proxy is actually in front (Vercel: 1 hop). Otherwise a
+  // client could spoof its IP and evade per-IP rate limits.
+  app.set("trust proxy", config.TRUST_PROXY_HOPS);
 
-  app.use((req: Request, res: Response, next: NextFunction) => {
-    if (env.NODE_ENV === "production" && env.FORCE_HTTPS === "true" && req.headers["x-forwarded-proto"] === "http") {
-      res.redirect(301, `https://${req.headers.host}${req.originalUrl}`);
-      return;
-    }
-    next();
-  });
+  app.use(
+    pinoHttp({
+      logger,
+      // Never log bodies (they can contain signed XDR or document data).
+      serializers: {
+        req: (req) => ({ method: req.method, url: req.url }),
+        res: (res) => ({ statusCode: res.statusCode }),
+      },
+      autoLogging: { ignore: (req) => !req.url?.startsWith("/api") },
+    }),
+  );
 
-  app.use(pinoHttp({ logger }));
-  app.use(helmet({
-    contentSecurityPolicy: false,
-    crossOriginResourcePolicy: false,
-    crossOriginOpenerPolicy: false,
-    crossOriginEmbedderPolicy: false,
-    originAgentCluster: false
-  }));
-
-  app.use((req, res, next) => {
-    res.removeHeader('Cross-Origin-Opener-Policy');
-    res.removeHeader('Cross-Origin-Embedder-Policy');
-    res.removeHeader('Cross-Origin-Resource-Policy');
-    next();
-  });
+  // The SPA's CSP lives in index.html / vercel.json; the API only serves JSON.
+  app.use(
+    helmet({
+      contentSecurityPolicy: false,
+      crossOriginEmbedderPolicy: false,
+      // Freighter/Albedo use popups; same-origin-allow-popups keeps them working.
+      crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" },
+    }),
+  );
 
   app.use((_req, res, next) => {
     res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()");
     next();
   });
 
-  app.use(cors({
-    origin: (origin, callback) => {
-      const allowed = [
-        'http://127.0.0.1:3000',
-        'http://127.0.0.1:3001',
-        'http://127.0.0.1:3002',
-        'http://localhost:3000',
-        'http://localhost:3001',
-        'http://localhost:3002',
-        /\.vercel\.app$/,  // allows any vercel.app subdomain
-      ];
-      if (!origin) return callback(null, true); // allow server-to-server
-      const isAllowed = allowed.some(a =>
-        typeof a === 'string' ? a === origin : a.test(origin)
-      );
-      callback(null, isAllowed);
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key']
-  }));
-
-  app.options('*', cors());
-
-  if (!(env.NODE_ENV !== "production" && env.SECURITY_RELAXED_LOCAL === "true")) {
-    app.use(clerkMiddleware({ authorizedParties: allowedOrigins }));
-  }
+  // Same-origin requests (the normal case) send no Origin header for GET and are always allowed.
+  // Cross-origin callers must be listed explicitly in APP_ORIGIN — no wildcard domains.
+  app.use(
+    "/api",
+    cors({
+      origin(origin, callback) {
+        if (!origin || config.allowedOrigins.includes(origin)) return callback(null, true);
+        return callback(null, false);
+      },
+      credentials: true,
+      methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+      allowedHeaders: ["Content-Type"],
+    }),
+  );
 }

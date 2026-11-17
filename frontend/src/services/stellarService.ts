@@ -1,561 +1,280 @@
-import * as StellarSdk from "stellar-sdk";
-import { getAddress, getNetworkDetails, isAllowed, isConnected, requestAccess, signTransaction } from "@stellar/freighter-api";
-import { ConnectedWallet, Invoice, Transaction, WalletProvider } from "../types";
-import { getUserStorageKey, safeStorage } from "../utils/storage";
+/**
+ * Data and blockchain layer for the Fintrix UI. Every function talks to the Fintrix API
+ * (Postgres + Soroban escrow contract). Nothing is stored in localStorage and nothing is
+ * simulated: success is only returned after the Stellar network confirms a transaction.
+ */
+import { api, ApiError } from "../lib/api";
+import { getWallet, WalletError, type WalletKind } from "../lib/wallet";
+import type { ApiInvoice, ChainAction, ChainResult, ConnectedWallet, Invoice, InvoiceStatus, WalletProvider } from "../types";
 
-const HORIZON_URL = "https://horizon-testnet.stellar.org";
-const PASSPHRASE = "Test SDF Network ; September 2015";
-const API = import.meta.env.VITE_API_URL || "";
-const horizonServer = new StellarSdk.Horizon.Server(HORIZON_URL);
+// ------------------------------------------------------------------ helpers
+
+const STATUS_MAP: Record<ApiInvoice["status"], InvoiceStatus> = {
+  draft: "draft",
+  listed: "active",
+  funded: "funded",
+  repaid: "repaid",
+  settled: "settled",
+  cancelled: "cancelled",
+  defaulted: "defaulted",
+};
+
+/** Maps an API invoice to the shape the original UI components render. */
+export function toUiInvoice(dto: ApiInvoice): Invoice {
+  const status = STATUS_MAP[dto.status];
+  const funded = ["funded", "repaid", "settled", "defaulted"].includes(dto.status) ? dto.terms.price : 0;
+  return {
+    id: dto.id,
+    buyer: dto.buyerName,
+    amount: dto.total,
+    discount: dto.discountBps / 100,
+    due: dto.dueDate,
+    status,
+    seller: dto.seller.address,
+    funder: dto.investor?.address,
+    yield: Number((dto.terms.annualisedYield * 100).toFixed(1)),
+    funded,
+    tags: [dto.isDemo ? "Demo listing" : "On-chain", ...(dto.duplicateFlags.length ? ["Duplicate warning"] : [])],
+    // Original UI scale: 0–100, lower is safer. Here: modelled probability of late payment.
+    riskScore: dto.risk ? Math.round(dto.risk.score * 100) : 50,
+    aiSummary: dto.notes ?? "",
+    txHash: dto.chain.lastTxHash ?? undefined,
+    companyName: dto.buyerName,
+    industry: dto.issuerName,
+    country: dto.buyerCountry ?? "",
+    dto,
+  };
+}
+
+function walletKind(provider: WalletProvider): WalletKind {
+  return provider === "albedo" ? "albedo" : "freighter";
+}
+
+interface SessionUser {
+  id: string;
+  stellarAddress: string;
+  displayName: string | null;
+}
+
+const LAST_PROVIDER_KEY = "fintrix_wallet_provider";
+
+function rememberProvider(provider: WalletProvider) {
+  try {
+    localStorage.setItem(LAST_PROVIDER_KEY, provider);
+  } catch {
+    // storage unavailable: only affects which wallet signs after a reload
+  }
+}
+
+function lastProvider(): WalletProvider {
+  try {
+    return localStorage.getItem(LAST_PROVIDER_KEY) === "albedo" ? "albedo" : "freighter";
+  } catch {
+    return "freighter";
+  }
+}
+
+function toWallet(user: SessionUser, provider: WalletProvider): ConnectedWallet {
+  return { publicKey: user.stellarAddress, provider, label: provider === "albedo" ? "Albedo" : "Freighter" };
+}
+
+// ------------------------------------------------------------------ session
 
 /**
- * Safe fetch wrapper that validates JSON responses and provides clear error messages
+ * Signs in with the chosen wallet: the server issues a one-time challenge, the wallet
+ * signs it (the user approves in the wallet), and the server verifies it and starts a session.
+ * `address` is the account the wallet screen already connected.
  */
-async function safeFetch(url: string, options: RequestInit) {
-  console.log('[FINTRIX safeFetch]', options.method || 'GET', url);
-  let res: Response;
+export async function signInWithWallet(provider: WalletProvider, address?: string): Promise<ConnectedWallet> {
+  const wallet = getWallet(walletKind(provider));
+  const account = address ?? (await wallet.connect());
+  const challenge = await api<{ nonce: string; message: string }>("/api/auth/challenge", { body: { address: account } });
+  const signed = await wallet.signMessage(challenge.message, account);
+  const result = await api<{ user: SessionUser }>("/api/auth/verify", {
+    body: { address: account, nonce: challenge.nonce, signature: signed.signature, ...(signed.signedMessage ? { signedMessage: signed.signedMessage } : {}) },
+  });
+  rememberProvider(provider);
+  return toWallet(result.user, provider);
+}
+
+/** Restores an existing session after a page reload. */
+export async function restoreSession(): Promise<ConnectedWallet | null> {
   try {
-    res = await fetch(url, options);
-  } catch (networkError: any) {
-    console.error('[FINTRIX safeFetch] Network error:', networkError);
-    throw new Error(`Network error calling ${url}: ${networkError.message}. Check if the dev server is running.`);
-  }
-
-  const text = await res.text();
-  console.log('[FINTRIX safeFetch] Status:', res.status, 'Body length:', text.length);
-
-  if (!text || text.trim() === '') {
-    throw new Error(`API ${url} returned empty response (status ${res.status}).`);
-  }
-
-  let data: any;
-  try {
-    data = JSON.parse(text);
+    const session = await api<{ user: SessionUser | null }>("/api/auth/session");
+    return session.user ? toWallet(session.user, lastProvider()) : null;
   } catch {
-    throw new Error(
-      `API ${url} returned non-JSON (status ${res.status}). ` +
-      `Response preview: ${text.substring(0, 200)}`
-    );
-  }
-
-  if (!res.ok) {
-    throw new Error(data.error || `${url} failed: ${res.status}`);
-  }
-  
-  return data;
-}
-
-function apiPath(path: string) {
-  const base = API ? API.replace(/\/$/, '') : '';
-  return base + path;
-}
-
-export function validatePublicKey(publicKey: string) {
-  return StellarSdk.StrKey.isValidEd25519PublicKey(publicKey.trim());
-}
-
-export async function connectFreighterWallet(): Promise<ConnectedWallet> {
-  const status = await isConnected();
-  if (status.error && !status.isConnected) {
-    throw new Error(status.error.message);
-  }
-
-  const permission = await isAllowed();
-  if (permission.error) {
-    throw new Error(permission.error.message);
-  }
-
-  const access = permission.isAllowed ? await getAddress() : await requestAccess();
-  if (access.error && !access.address) {
-    const fallbackAddress = await getAddress();
-    if (fallbackAddress.error || !fallbackAddress.address) {
-      throw new Error(
-        access.error.message ||
-        fallbackAddress.error?.message ||
-        "Freighter is installed but did not provide an address. Unlock the extension, allow this site, and try again."
-      );
-    }
-    return {
-      publicKey: fallbackAddress.address,
-      provider: "freighter",
-      label: "Freighter",
-    };
-  }
-
-  const fallback = !access.address ? await getAddress() : access;
-  if (fallback.error || !fallback.address) {
-    throw new Error(
-      fallback.error?.message ||
-      "Freighter is installed but did not return an address. Re-open Freighter, approve this site, and try again."
-    );
-  }
-
-  return {
-    publicKey: fallback.address,
-    provider: "freighter",
-    label: "Freighter",
-  };
-}
-
-export async function connectManualWallet(provider: WalletProvider, publicKey?: string): Promise<ConnectedWallet> {
-  if (provider === "demo") {
-    return {
-      publicKey: StellarSdk.Keypair.random().publicKey(),
-      provider,
-      label: "Demo Wallet",
-    };
-  }
-
-  if (!publicKey || !validatePublicKey(publicKey)) {
-    throw new Error("Enter a valid Stellar public key.");
-  }
-
-  return {
-    publicKey: publicKey.trim(),
-    provider,
-    label: provider === "albedo" ? "Albedo" : "Phyto Wallet",
-  };
-}
-
-export async function getAccountBalance(publicKey: string) {
-  try {
-    const account = await horizonServer.loadAccount(publicKey);
-    const nativeBalance = account.balances.find((balance) => balance.asset_type === "native");
-    return nativeBalance ? Number(nativeBalance.balance) : 0;
-  } catch (error) {
-    console.warn("Unable to fetch Horizon balance", error);
-    return 0;
+    return null;
   }
 }
 
-export async function getNetworkSummary() {
-  try {
-    const details = await getNetworkDetails();
-    if (details.error) {
-      return { network: "Stellar Testnet", sorobanRpcUrl: "Configured externally" };
-    }
-
-    return {
-      network: details.network || "Stellar Testnet",
-      sorobanRpcUrl: details.sorobanRpcUrl || "Configured externally",
-    };
-  } catch {
-    return { network: "Stellar Testnet", sorobanRpcUrl: "Configured externally" };
-  }
+export async function signOut() {
+  await api("/api/auth/logout", { method: "POST" }).catch(() => undefined);
 }
 
-const SEED_INVOICES: Invoice[] = [
-  { id: "#INV-4921", buyer: "TechLogistics Ltd", amount: 45000, discount: 8, due: "2026-10-24", status: "funded", seller: "demo", yield: 8.2, riskScore: 18, funded: 45000, tags: ["logistics", "uk"], aiSummary: "Tier-1 supplier", companyName: "TechLogistics Ltd", industry: "Logistics & Supply Chain", country: "India" },
-  { id: "#INV-4922", buyer: "Quantum Global", amount: 12800, discount: 9.5, due: "2026-11-02", status: "active", seller: "demo", yield: 9.5, riskScore: 35, funded: 0, tags: ["tech"], aiSummary: "SaaS provider", companyName: "Quantum Global", industry: "Technology & Software", country: "Singapore" },
-  { id: "#INV-4925", buyer: "Arcane Systems", amount: 2450, discount: 7.8, due: "2026-10-29", status: "funded", seller: "demo", yield: 7.8, riskScore: 22, funded: 2450, tags: ["hardware"], aiSummary: "Hardware manufacturer", companyName: "Arcane Systems", industry: "Defense & Aerospace", country: "United Kingdom" },
-];
+// Kept for the original screens: connecting = signing in.
+export const connectFreighterWallet = () => signInWithWallet("freighter");
+export const connectManualWallet = (provider: WalletProvider, publicKey?: string) => signInWithWallet(provider, publicKey);
 
-function getLocalInvoices(): Invoice[] {
-  const stored = safeStorage.get<Invoice[]>("invoices", []);
-  if (!stored.length) {
-    safeStorage.set("invoices", SEED_INVOICES);
-    return SEED_INVOICES;
-  }
+// ------------------------------------------------------------------ account
 
-  const parsed = stored;
-  const needsRefresh = parsed.some((invoice) => invoice.id?.startsWith("#INV-492") && !invoice.companyName);
-  if (needsRefresh) {
-    const merged = SEED_INVOICES.map((seed) => {
-      const existing = parsed.find((invoice) => invoice.id === seed.id);
-      return existing
-        ? {
-            ...seed,
-            ...existing,
-            companyName: existing.companyName || seed.companyName,
-            industry: existing.industry || seed.industry,
-            country: existing.country || seed.country,
-          }
-        : seed;
-    });
-    const userInvoices = parsed.filter((invoice) => !SEED_INVOICES.some((seed) => seed.id === invoice.id));
-    const all = [...merged, ...userInvoices];
-    safeStorage.set("invoices", all);
-    return all;
-  }
-
-  return parsed;
+/** Native XLM balance from Horizon (0 when the account is not activated yet). */
+export async function getAccountBalance(_publicKey?: string): Promise<number> {
+  const account = await api<{ exists: boolean; balances: Array<{ asset: string; balance: string }> }>("/api/chain/account");
+  const native = account.balances.find((balance) => balance.asset === "XLM");
+  return native ? Number(native.balance) : 0;
 }
 
-function setLocalInvoices(invoices: Invoice[]) {
-  safeStorage.set("invoices", invoices);
+export async function getAccount() {
+  return api<{ address: string; network: string; exists: boolean; balances: Array<{ asset: string; balance: string }>; friendbotUrl: string | null }>("/api/chain/account");
 }
 
+// ------------------------------------------------------------------ invoices
+
+/** All invoices visible to the user: on-chain listings plus their own drafts. */
 export async function getInvoices(): Promise<Invoice[]> {
-  await new Promise((res) => setTimeout(res, 300));
-  return getLocalInvoices();
+  const page = await api<{ items: ApiInvoice[] }>("/api/invoices?scope=all&limit=100");
+  return page.items.map(toUiInvoice);
 }
 
-export async function createInvoice(payload: {
-  amount: number;
-  due: string;
-  buyer: string;
-  number?: string;
-  discount: number;
-  seller: string;
-  notes?: string;
-  companyName?: string;
-  industry?: string;
-  country?: string;
-}): Promise<Invoice> {
-  await new Promise((res) => setTimeout(res, 800));
-  const newInvoice: Invoice = {
-    id: payload.number || `#INV-${Math.floor(Math.random() * 10000)}`,
-    buyer: payload.buyer,
-    amount: payload.amount,
-    discount: payload.discount,
-    due: payload.due,
-    status: "active",
-    seller: payload.seller,
-    yield: payload.discount,
-    riskScore: Math.floor(Math.random() * 30) + 10,
-    funded: 0,
-    tags: ["new", "simulation"],
-    aiSummary: payload.notes?.trim() || "",
-    companyName: payload.companyName?.trim() || payload.buyer || "",
-    industry: payload.industry?.trim() || "",
-    country: payload.country?.trim() || "",
-  };
-  const current = getLocalInvoices();
-  setLocalInvoices([newInvoice, ...current]);
-  return newInvoice;
+export async function getInvoice(id: string): Promise<Invoice> {
+  return toUiInvoice(await api<ApiInvoice>(`/api/invoices/${id}`));
 }
 
-export async function fundInvoice(
-  invoiceId: string,
-  amountUSD: number,
-  deal: { company?: string; apy?: number; repaymentDate?: string }
-) {
-  console.log('[FINTRIX fundInvoice] Start — checking Freighter connection...');
-  const connected = await isConnected();
-  if (!connected || !connected.isConnected) {
-    throw new Error('Freighter is not connected. Click "Connect Wallet" first.');
+export interface ChainActionResult {
+  txHash: string;
+  explorerUrl: string;
+  ledger: number | null;
+  invoice: Invoice | null;
+}
+
+/**
+ * Runs an on-chain invoice action: the server prepares and simulates the transaction,
+ * the wallet asks the user to approve it, the server checks it is the exact prepared
+ * transaction, submits it and waits for the network to confirm.
+ */
+export async function runChainAction(invoiceId: string, action: ChainAction, wallet: ConnectedWallet): Promise<ChainActionResult> {
+  const prepared = await api<{ transactionId: string; xdr: string; networkPassphrase: string }>(`/api/invoices/${invoiceId}/actions/${action}`, { method: "POST" });
+  const signedXdr = await getWallet(walletKind(wallet.provider)).signTransaction(prepared.xdr, { networkPassphrase: prepared.networkPassphrase, address: wallet.publicKey });
+  return confirm(prepared.transactionId, signedXdr);
+}
+
+async function confirm(transactionId: string, signedXdr: string): Promise<ChainActionResult> {
+  let result = await api<ChainResult>(`/api/chain/transactions/${transactionId}/submit`, { body: { signedXdr } });
+  for (let attempt = 0; attempt < 6 && result.status === "submitted"; attempt++) {
+    result = await api<ChainResult>(`/api/chain/transactions/${transactionId}`);
   }
-  console.log('[FINTRIX fundInvoice] Freighter connected. Getting address...');
-
-  const addrResult = await getAddress();
-  const investorPublicKey = addrResult?.address;
-
-  if (!investorPublicKey || investorPublicKey.length !== 56) {
-    throw new Error(`Invalid wallet address from Freighter: "${investorPublicKey}"`);
+  if (result.status === "submitted") {
+    throw new Error(`The network has not confirmed transaction ${result.hash.slice(0, 10)}… yet. It is not marked as successful; check Dashboard → activity shortly.`);
   }
-  console.log('[FINTRIX fundInvoice] Wallet:', investorPublicKey.substring(0, 10) + '...');
+  if (result.status !== "success") throw new Error(result.error ?? "The transaction failed on-chain.");
+  return { txHash: result.hash, explorerUrl: result.explorerUrl ?? "", ledger: result.ledger, invoice: result.invoice ? toUiInvoice(result.invoice) : null };
+}
 
-  console.log('[FINTRIX fundInvoice] Building XDR via /api/stellar/build...');
-  const buildData = await safeFetch(apiPath('/api/stellar/build'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      investorPublicKey,
-      amountUSD: Number(amountUSD),
-      invoiceId: String(invoiceId),
-    }),
+/** Funds a listed invoice in full (the contract funds the whole price in one transaction). */
+export async function fundInvoiceOnBackend(invoiceId: string, wallet: ConnectedWallet): Promise<Invoice & { txHash: string; explorerUrl: string }> {
+  const result = await runChainAction(invoiceId, "fund", wallet);
+  const invoice = result.invoice ?? (await getInvoice(invoiceId));
+  return { ...invoice, txHash: result.txHash, explorerUrl: result.explorerUrl };
+}
+
+export async function repayInvoiceOnBackend(invoiceId: string, wallet: ConnectedWallet): Promise<Invoice & { txHash: string; explorerUrl: string }> {
+  const result = await runChainAction(invoiceId, "repay", wallet);
+  const invoice = result.invoice ?? (await getInvoice(invoiceId));
+  return { ...invoice, txHash: result.txHash, explorerUrl: result.explorerUrl };
+}
+
+/**
+ * "Simulate on Testnet": signs a 1 XLM payment to the user's own account with a memo
+ * referencing the deal, recording the projected return on-chain. No investment is made.
+ */
+export async function simulateOnTestnet(wallet: ConnectedWallet, deal: { id: string; company: string }, amountUSD: number, expectedReturn: number, maturityDate: string) {
+  const prepared = await api<{ transactionId: string; xdr: string; networkPassphrase: string }>("/api/chain/simulations", {
+    body: { invoiceId: deal.id, amountUSD, expectedReturn, maturityDate },
   });
-
-  const { xdr } = buildData;
-
-  // Before signing — verify XDR is valid
-  if (!xdr || typeof xdr !== 'string' || xdr.length < 100) {
-    throw new Error(
-      `Invalid XDR received from server: "${String(xdr).substring(0, 50)}". ` +
-      `This usually means the API call failed and returned HTML instead of JSON.`
-    );
-  }
-
-  console.log('[FINTRIX fundInvoice] XDR received (length:', xdr.length, '). Opening Freighter for signing...');
-
-  let signedXdr: string;
-  try {
-    const signResult = await signTransaction(xdr, {
-      networkPassphrase: PASSPHRASE,
-    });
-
-    // Handle all possible Freighter response shapes
-    signedXdr = (signResult as any)?.signedTxXdr 
-      || (signResult as any)?.xdr
-      || (signResult as any)?.signed_envelope_xdr
-      || (typeof signResult === 'string' ? signResult : '');
-
-    console.log('[FINTRIX fundInvoice] Freighter signed! signedXdr length:', signedXdr?.length);
-
-    if (!signedXdr || typeof signedXdr !== 'string' || signedXdr.trim() === "") {
-      throw new Error("Freighter returned empty signed transaction");
-    }
-  } catch (error: any) {
-    const msg = error?.message || String(error);
-    if (msg.toLowerCase().includes("decli") || msg.toLowerCase().includes("reject") || msg.toLowerCase().includes("cancel")) {
-      throw new Error("You cancelled the transaction in Freighter.");
-    }
-    if (msg.includes('empty') || msg.includes('undefined')) {
-      throw new Error(
-        'Freighter did not return a signed transaction. ' +
-        'Check that: 1) Freighter is set to TESTNET network, ' +
-        '2) You clicked Approve (not Decline), ' +
-        '3) Your wallet has enough XLM for fees.'
-      );
-    }
-    throw new Error(`Freighter signing error: ${msg}`);
-  }
-
-  console.log('[FINTRIX fundInvoice] Submitting signed transaction to Stellar testnet...');
-  const submitData = await safeFetch(apiPath('/api/stellar/submit'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      signedXdr,
-      invoiceId,
-      amountUSD,
-      company: deal.company,
-      apy: deal.apy,
-      repaymentDate: deal.repaymentDate,
-    }),
-  });
-
-  // Ensure txHash exists before using
-  const txRaw = submitData?.txHash || submitData?.hash || null;
-  if (!txRaw || typeof txRaw !== "string") {
-    console.error("Invalid txHash:", txRaw);
-    throw new Error("Transaction failed: invalid txHash");
-  }
-
-  console.log('[FINTRIX fundInvoice] SUCCESS! txHash:', txRaw);
-
-  try {
-    const portfolioEntry = {
-      txHash: txRaw,
-      explorerUrl: submitData.explorerUrl,
-      invoiceId,
-      company: deal.company || "Unknown",
-      amountUSD: Number(amountUSD),
-      amountXLM: parseFloat(buildData.xlmAmount),
-      apy: deal.apy || 0,
-      APY: deal.apy || 0,
-      fundedAt: new Date().toISOString(),
-      maturityDate: deal.repaymentDate || null,
-      status: "active",
-      type: "investment",
-    };
-
-    safeStorage.append(getUserStorageKey(investorPublicKey, "portfolio"), portfolioEntry, 100);
-    safeStorage.append(getUserStorageKey(investorPublicKey, "activity"), {
-      type: "funded",
-      label: `Funded ${deal.company || "Unknown"} invoice`,
-      amount: `$${Number(amountUSD).toLocaleString()}`,
-      txHash: txRaw,
-      timestamp: new Date().toISOString(),
-    }, 50);
-  } catch {
-    // Non-fatal: chain confirmation is the source of truth for this action.
-  }
-
+  const signedXdr = await getWallet(walletKind(wallet.provider)).signTransaction(prepared.xdr, { networkPassphrase: prepared.networkPassphrase, address: wallet.publicKey });
+  const result = await confirm(prepared.transactionId, signedXdr);
   return {
-    success: true,
-    txHash: txRaw,
-    explorerUrl: submitData.explorerUrl,
-  };
-}
-
-export async function simulateOnTestnet(
-  amountUSD: number,
-  deal: { id: string; company?: string; apy?: number; durationDays?: number; repaymentDate?: string }
-) {
-  const connected = await isConnected();
-  if (!connected?.isConnected) {
-    throw new Error("Freighter not connected. Please connect your wallet first.");
-  }
-
-  const addrResult = await getAddress();
-  const investorPublicKey = addrResult?.address;
-  if (!investorPublicKey || investorPublicKey.length !== 56) {
-    throw new Error("Invalid wallet address from Freighter.");
-  }
-
-  const buildData = await safeFetch(apiPath('/api/stellar/build-simulation'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      investorPublicKey,
-      amountUSD: Number(amountUSD),
-      invoiceId: deal.id,
-      dealId: deal.id,
-    }),
-  });
-
-  const { xdr } = buildData;
-
-  // Before signing — verify XDR is valid
-  if (!xdr || typeof xdr !== 'string' || xdr.length < 100) {
-    throw new Error(
-      `Invalid XDR received from server: "${String(xdr).substring(0, 50)}". ` +
-      `This usually means the API call failed and returned HTML instead of JSON.`
-    );
-  }
-
-  console.log("XDR before signing:", xdr);
-
-  let signedXdr: string;
-  try {
-    const signResult = await signTransaction(xdr, {
-      networkPassphrase: PASSPHRASE,
-    });
-
-    // Handle all possible Freighter response shapes
-    signedXdr = (signResult as any)?.signedTxXdr 
-      || (signResult as any)?.xdr
-      || (signResult as any)?.signed_envelope_xdr
-      || (typeof signResult === 'string' ? signResult : '');
-
-    console.log("Signed XDR:", signedXdr);
-
-    if (!signedXdr || typeof signedXdr !== 'string' || signedXdr.trim() === "") {
-      throw new Error("Freighter returned empty signed transaction");
-    }
-  } catch (error: any) {
-    const msg = error?.message || String(error);
-    if (msg.toLowerCase().includes("decli") || msg.toLowerCase().includes("cancel") || msg.toLowerCase().includes("reject")) {
-      throw new Error("Simulation cancelled in Freighter.");
-    }
-    if (msg.includes('empty') || msg.includes('undefined')) {
-      throw new Error(
-        'Freighter did not return a signed transaction. ' +
-        'Check that: 1) Freighter is set to TESTNET network, ' +
-        '2) You clicked Approve (not Decline), ' +
-        '3) Your wallet has at least 2 XLM for fees.'
-      );
-    }
-    throw new Error(`Freighter signing failed: ${msg}`);
-  }
-
-  const submitData = await safeFetch(apiPath('/api/stellar/submit'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ signedXdr, invoiceId: deal.id, amountUSD }),
-  });
-
-  const txRaw = submitData?.txHash || submitData?.hash || null;
-  if (!txRaw || typeof txRaw !== "string") {
-    console.error("Invalid txHash:", txRaw);
-    throw new Error("Transaction failed: invalid txHash");
-  }
-
-  const shortHash = txRaw.substring(0, 10);
-  const realSimId = `SIM-${shortHash.toUpperCase()}`;
-  const expectedReturn = parseFloat(
-    (amountUSD * ((deal.apy || 0) / 100) * ((deal.durationDays || 180) / 365)).toFixed(2)
-  );
-  const maturityDate = deal.repaymentDate ||
-    new Date(Date.now() + (deal.durationDays || 180) * 86400000).toISOString().split("T")[0];
-
-  const simRecord = {
-    simId: realSimId,
-    txHash: txRaw,
-    explorerUrl: submitData.explorerUrl,
-    invoiceId: deal.id,
-    company: deal.company || "Unknown",
+    simId: `SIM-${result.txHash.slice(0, 10).toUpperCase()}`,
+    txHash: result.txHash,
+    explorerUrl: result.explorerUrl,
     amountUSD,
     expectedReturn,
     maturityDate,
-    simulatedAt: new Date().toISOString(),
-    onChain: true,
+    company: deal.company,
   };
+}
 
+// ------------------------------------------------------------------ activity
+
+export interface ChainTxRecord {
+  id: string;
+  kind: ChainAction | "simulation";
+  status: string;
+  hash: string;
+  ledger: number | null;
+  amount: string | null;
+  asset: string | null;
+  error: string | null;
+  invoiceId: string | null;
+  invoiceNumber: string | null;
+  explorerUrl: string;
+  simulation: { company?: string; amountUSD?: number; expectedReturn?: number; maturityDate?: string } | null;
+  createdAt: string;
+  confirmedAt: string | null;
+}
+
+export async function getTransactions(): Promise<ChainTxRecord[]> {
+  return api<ChainTxRecord[]>("/api/chain/transactions");
+}
+
+// ------------------------------------------------------------------ documents
+
+export interface ExtractedFields {
+  invoiceNumber: string | null;
+  issueDate: string | null;
+  dueDate: string | null;
+  issuer: { name: string | null; address: string | null; taxId: string | null };
+  recipient: { name: string | null; address: string | null; taxId: string | null };
+  currency: string | null;
+  subtotal: number | null;
+  tax: number | null;
+  total: number | null;
+  lineItems: Array<{ description: string; quantity: number | null; unitPrice: number | null; amount: number | null }>;
+}
+
+export interface UploadResult {
+  document: { id: string; filename: string; mimeType: string; sizeBytes: number; sha256: string };
+  extraction: {
+    id: string;
+    engine: string;
+    status: "succeeded" | "failed";
+    fields: ExtractedFields | null;
+    confidence: Record<string, number>;
+    issues: Array<{ field: string; severity: "error" | "warning"; message: string }>;
+    error: string | null;
+  } | null;
+  alreadyRegistered: Array<{ yours: boolean; status: string }>;
+}
+
+export async function uploadInvoiceDocument(file: File): Promise<UploadResult> {
+  const form = new FormData();
+  form.append("file", file);
+  return api<UploadResult>("/api/documents", { body: form });
+}
+
+/**
+ * Saves the user-reviewed fields, creates the invoice from them and lists it on-chain
+ * (the wallet asks for approval). Extracted data is never used without this review.
+ */
+export async function confirmAndListInvoice(extractionId: string, fields: ExtractedFields, discountBps: number, wallet: ConnectedWallet) {
+  await api(`/api/extractions/${extractionId}/review`, { method: "PUT", body: { fields } });
+  const invoice = await api<ApiInvoice>(`/api/extractions/${extractionId}/invoice`, { body: { discountBps } });
   try {
-    safeStorage.append(getUserStorageKey(investorPublicKey, "simulations"), simRecord, 100);
-    safeStorage.append(getUserStorageKey(investorPublicKey, "activity"), {
-      type: "simulation",
-      label: `Simulated ${deal.company || "Unknown"} return`,
-      amount: `$${Number(amountUSD).toLocaleString()}`,
-      txHash: submitData.txHash,
-      timestamp: new Date().toISOString(),
-    }, 50);
-  } catch {
-    // Best-effort local caching only.
+    const listed = await runChainAction(invoice.id, "create", wallet);
+    return { invoice: listed.invoice ?? toUiInvoice(invoice), txHash: listed.txHash, explorerUrl: listed.explorerUrl };
+  } catch (error) {
+    // The draft exists even if listing was declined or failed; surface why.
+    const reason = error instanceof WalletError || error instanceof ApiError ? error.message : String((error as Error)?.message ?? error);
+    throw new Error(`Invoice saved as a draft, but listing on-chain did not complete: ${reason}`);
   }
-
-  return simRecord;
-}
-
-export async function fundInvoiceOnBackend(invoiceId: string, funder: string, provider: WalletProvider, amountUSD?: number): Promise<Invoice> {
-  const current = getLocalInvoices();
-  const invoice = current.find((item) => item.id === invoiceId);
-  if (!invoice) {
-    throw new Error("Invoice not found");
-  }
-
-  if (provider !== "freighter") {
-    throw new Error("Real testnet funding requires a connected Freighter wallet.");
-  }
-
-  const fundingAmountUSD = amountUSD || invoice.amount;
-  const investorPublicKey = funder;
-  const result = await fundInvoice(invoiceId, fundingAmountUSD, {
-    company: invoice.companyName || invoice.buyer,
-    apy: invoice.yield,
-    repaymentDate: invoice.due,
-  });
-
-  invoice.status = "funded";
-  invoice.funder = investorPublicKey;
-  invoice.funded = fundingAmountUSD;
-  invoice.txHash = result.txHash;
-  setLocalInvoices(current);
-
-  return invoice;
-}
-
-export async function repayInvoiceOnBackend(invoiceId: string): Promise<Invoice> {
-  const current = getLocalInvoices();
-  const invoice = current.find((item) => item.id === invoiceId);
-  if (!invoice) {
-    throw new Error("Invoice not found");
-  }
-
-  invoice.status = "repaid";
-  setLocalInvoices(current);
-  return invoice;
-}
-
-export async function getTransactions(): Promise<Transaction[]> {
-  return [];
-}
-
-export async function buildSorobanEscrowPreview(invoiceId: string, amount: number) {
-  await new Promise((resolve) => setTimeout(resolve, 900));
-  return {
-    invoiceId,
-    amount,
-    settlementAsset: "XLM",
-    contractAction: "fund_invoice",
-    sorobanPattern: "create -> fund -> repay",
-  };
-}
-
-export async function confirmFreighterAction() {
-  const status = await isConnected();
-  if (status.error || !status.isConnected) {
-    throw new Error("Freighter extension not detected. Install/open Freighter first.");
-  }
-
-  const permission = await isAllowed();
-  if (permission.error) {
-    throw new Error(permission.error.message);
-  }
-
-  if (!permission.isAllowed) {
-    const access = await requestAccess();
-    if (access.error) {
-      throw new Error(access.error.message || "Freighter confirmation was rejected.");
-    }
-  }
-
-  const address = await getAddress();
-  if (address.error || !address.address) {
-    throw new Error(address.error?.message || "Unable to confirm Freighter session.");
-  }
-
-  return address.address;
 }

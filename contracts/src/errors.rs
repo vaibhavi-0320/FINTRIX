@@ -5,9 +5,13 @@ use soroban_sdk::contracterror;
 #[repr(u32)]
 pub enum ContractError {
     InvoiceNotFound = 1,
-    InvoiceAlreadyExists = 2,
-    InvoiceAlreadyFunded = 3,
-    InvoiceNotFunded = 4,
-    InvalidAmount = 5,
-    InvalidRepayment = 6,
+    InvalidAmount = 2,
+    InvalidDueDate = 3,
+    DuplicateDocument = 4,
+    InvalidStatus = 5,
+    SelfFunding = 6,
+    InvoiceExpired = 7,
+    NotInvestor = 8,
+    NotSeller = 9,
+    NotYetDue = 10,
 }
