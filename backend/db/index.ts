@@ -54,7 +54,9 @@ async function createPostgres(url: string): Promise<Db> {
   const pool = new pg.Pool({
     connectionString: url,
     max: Number(process.env.DATABASE_POOL_MAX || 5),
-    ssl: /sslmode=disable|localhost|127\.0\.0\.1/.test(url) ? undefined : { rejectUnauthorized: false },
+    // Certificates are verified (Neon, Supabase and most hosts have valid ones). Only for a provider
+    // with a private CA, DATABASE_SSL_NO_VERIFY=1 turns verification off.
+    ssl: /sslmode=disable|localhost|127\.0\.0\.1/.test(url) ? undefined : { rejectUnauthorized: process.env.DATABASE_SSL_NO_VERIFY !== "1" },
   });
   pool.on("error", (error: Error) => logger.error({ err: error.message }, "postgres pool error"));
   return {
