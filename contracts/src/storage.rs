@@ -1,48 +1,59 @@
-use soroban_sdk::{panic_with_error, Env, Vec};
+use soroban_sdk::{Address, BytesN, Env};
 
 use crate::errors::ContractError;
-use crate::types::{Invoice, InvoiceKey};
+use crate::types::{DataKey, Invoice, InvoiceStatus};
 
-const TTL_THRESHOLD: u32 = 100;
-const TTL_BUMP: u32 = 1000;
+/// ~30 days of ledgers at 5s per ledger. Entries are bumped on every touch.
+const TTL_THRESHOLD: u32 = 17_280 * 15;
+const TTL_EXTEND_TO: u32 = 17_280 * 30;
 
-fn bump_instance(env: &Env) {
-    env.storage().instance().extend_ttl(TTL_THRESHOLD, TTL_BUMP);
+pub fn bump_instance(env: &Env) {
+    env.storage().instance().extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO);
 }
 
-pub fn has_invoice(env: &Env, id: u64) -> bool {
-    env.storage().persistent().has(&InvoiceKey::Invoice(id))
+pub fn set_token(env: &Env, token: &Address) {
+    env.storage().instance().set(&DataKey::Token, token);
 }
 
-pub fn read_invoice(env: &Env, id: u64) -> Invoice {
-    bump_instance(env);
-    env.storage()
-        .persistent()
-        .get(&InvoiceKey::Invoice(id))
-        .unwrap_or_else(|| panic_with_error!(env, ContractError::InvoiceNotFound))
+pub fn token(env: &Env) -> Address {
+    env.storage().instance().get(&DataKey::Token).unwrap()
+}
+
+pub fn next_id(env: &Env) -> u64 {
+    let id: u64 = env.storage().instance().get(&DataKey::NextId).unwrap_or(1);
+    env.storage().instance().set(&DataKey::NextId, &(id + 1));
+    id
+}
+
+pub fn invoice_count(env: &Env) -> u64 {
+    let next: u64 = env.storage().instance().get(&DataKey::NextId).unwrap_or(1);
+    next - 1
+}
+
+pub fn read_invoice(env: &Env, id: u64) -> Result<Invoice, ContractError> {
+    let key = DataKey::Invoice(id);
+    let invoice: Invoice = env.storage().persistent().get(&key).ok_or(ContractError::InvoiceNotFound)?;
+    env.storage().persistent().extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+    Ok(invoice)
 }
 
 pub fn write_invoice(env: &Env, invoice: &Invoice) {
-    bump_instance(env);
-    env.storage()
-        .persistent()
-        .set(&InvoiceKey::Invoice(invoice.id), invoice);
+    let key = DataKey::Invoice(invoice.id);
+    env.storage().persistent().set(&key, invoice);
+    env.storage().persistent().extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
 }
 
-pub fn push_invoice_id(env: &Env, id: u64) {
-    let mut ids: Vec<u64> = env
-        .storage()
-        .persistent()
-        .get(&InvoiceKey::Registry)
-        .unwrap_or_else(|| Vec::new(env));
-    ids.push_back(id);
-    env.storage().persistent().set(&InvoiceKey::Registry, &ids);
+/// Returns the invoice currently holding this document hash, if it is still active.
+pub fn active_invoice_for_hash(env: &Env, hash: &BytesN<32>) -> Option<u64> {
+    let id: u64 = env.storage().persistent().get(&DataKey::DocHash(hash.clone()))?;
+    match read_invoice(env, id) {
+        Ok(invoice) if invoice.status != InvoiceStatus::Cancelled => Some(id),
+        _ => None,
+    }
 }
 
-pub fn read_invoice_ids(env: &Env) -> Vec<u64> {
-    bump_instance(env);
-    env.storage()
-        .persistent()
-        .get(&InvoiceKey::Registry)
-        .unwrap_or_else(|| Vec::new(env))
+pub fn set_hash_owner(env: &Env, hash: &BytesN<32>, id: u64) {
+    let key = DataKey::DocHash(hash.clone());
+    env.storage().persistent().set(&key, &id);
+    env.storage().persistent().extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
 }

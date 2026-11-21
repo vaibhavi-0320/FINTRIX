@@ -3,17 +3,25 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "allowJs": true,
-    "strict": false,
+    "lib": [
+      "ES2022"
+    ],
+    "types": [
+      "node"
+    ],
+    "strict": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
-    "jsx": "react-jsx",
-    "allowImportingTsExtensions": true,
-    "noEmit": true
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true
   },
   "include": [
-    "frontend/**/*.ts",
-    "frontend/**/*.tsx",
-    "backend/**/*.ts"
+    "backend/**/*.ts",
+    "tests/**/*.ts",
+    "scripts/**/*.mts",
+    "ml/**/*.mts"
   ]
 }

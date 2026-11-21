@@ -1,0 +1,98 @@
+{
+  "split": {
+    "type": "time-based",
+    "train_before": "2025-07-01",
+    "train_rows": 6562,
+    "test_rows": 1300
+  },
+  "label_rate": {
+    "train": 0.4265467845169156,
+    "test": 0.4338461538461538
+  },
+  "test_metrics": {
+    "logistic_regression": {
+      "roc_auc": 0.7190944919827321,
+      "pr_auc": 0.6531953731430433,
+      "brier": 0.21313533459290984,
+      "log_loss": 0.6158953406966797,
+      "accuracy_at_0_5": 0.6607692307692308,
+      "roc_auc_95ci": [
+        0.6911745977591727,
+        0.7451573140240609
+      ]
+    },
+    "gradient_boosting": {
+      "roc_auc": 0.6866484061825471,
+      "pr_auc": 0.6315211748855687,
+      "brier": 0.2216239176657541,
+      "log_loss": 0.635782127309064,
+      "accuracy_at_0_5": 0.6353846153846154
+    },
+    "baseline_constant_rate": {
+      "roc_auc": 0.5,
+      "pr_auc": 0.4338461538461538,
+      "brier": 0.2456769494316579,
+      "log_loss": 0.6844775581645195,
+      "accuracy_at_0_5": 0.5661538461538461
+    },
+    "baseline_prior_late_rate": {
+      "roc_auc": 0.7057086898704903,
+      "pr_auc": 0.6363691311525626,
+      "brier": 0.21959172703436078,
+      "log_loss": 0.7422043697074969,
+      "accuracy_at_0_5": 0.66
+    }
+  },
+  "subgroups": {
+    "buyers_with_history": {
+      "roc_auc": 0.7190944919827321,
+      "pr_auc": 0.6531953731430433,
+      "brier": 0.21313533459290984,
+      "log_loss": 0.6158953406966797,
+      "accuracy_at_0_5": 0.6607692307692308
+    },
+    "buyers_without_history": null,
+    "share_without_history": 0.0
+  },
+  "calibration_logreg": [
+    {
+      "bin": "0.0-0.2",
+      "count": 8,
+      "mean_predicted": 0.18461846845521634,
+      "observed_rate": 0.0
+    },
+    {
+      "bin": "0.2-0.4",
+      "count": 583,
+      "mean_predicted": 0.3166672476119187,
+      "observed_rate": 0.27615780445969124
+    },
+    {
+      "bin": "0.4-0.6",
+      "count": 529,
+      "mean_predicted": 0.4871675560700127,
+      "observed_rate": 0.5198487712665406
+    },
+    {
+      "bin": "0.6-0.8",
+      "count": 161,
+      "mean_predicted": 0.6762529334492043,
+      "observed_rate": 0.6832298136645962
+    },
+    {
+      "bin": "0.8-1.0",
+      "count": 19,
+      "mean_predicted": 0.8742276213192546,
+      "observed_rate": 0.9473684210526315
+    }
+  ],
+  "coefficients_standardised": {
+    "log_amount": 0.1756,
+    "terms_days": 0.1963,
+    "log_prior_count": -0.0668,
+    "prior_late_rate": 0.1885,
+    "prior_avg_days_late": 0.4722,
+    "has_history": 0.1272
+  },
+  "note": "Synthetic data: metrics measure recovery of the documented generating process, not real-world performance."
+}

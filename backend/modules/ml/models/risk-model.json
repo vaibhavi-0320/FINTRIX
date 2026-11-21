@@ -1,0 +1,58 @@
+{
+  "name": "fintrix-late-payment-logreg",
+  "version": "1.0.0",
+  "features": [
+    "log_amount",
+    "terms_days",
+    "log_prior_count",
+    "prior_late_rate",
+    "prior_avg_days_late",
+    "has_history"
+  ],
+  "mean": [
+    7.977857166923398,
+    41.264858274916186,
+    1.4983896610647442,
+    0.39955843727702867,
+    6.260691230083516,
+    0.8582749161840902
+  ],
+  "std": [
+    1.145285808464071,
+    20.994773287231048,
+    0.8070009554534938,
+    0.2928042632043005,
+    6.780135667466294,
+    0.3487679521304719
+  ],
+  "coef": [
+    0.17564511186125795,
+    0.19631782862179883,
+    -0.06677517538552619,
+    0.18847119209219512,
+    0.47217628535091505,
+    0.12721001872039422
+  ],
+  "intercept": -0.3017326615213981,
+  "defaults": {
+    "priorLateRate": 0.4265467845169156,
+    "priorAvgDaysLate": 6.953672660774155
+  },
+  "trainedAt": "2026-11-13T12:35:31+00:00",
+  "sklearnVersion": "1.9.1",
+  "dataset": {
+    "name": "Fintrix synthetic AR ledger",
+    "source": "ml/generate_dataset.py (seed 42, 600 buyers)",
+    "rows": 7862,
+    "trainRows": 6562,
+    "testRows": 1300,
+    "synthetic": true
+  },
+  "metrics": {
+    "roc_auc": 0.7191,
+    "pr_auc": 0.6532,
+    "brier": 0.2131,
+    "log_loss": 0.6159,
+    "accuracy_at_0_5": 0.6608
+  }
+}

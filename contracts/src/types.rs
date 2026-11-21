@@ -1,11 +1,20 @@
-use soroban_sdk::{contracttype, Address, String};
+use soroban_sdk::{contracttype, Address, BytesN};
 
+/// Lifecycle of a financed invoice.
+///
+/// Listed -> Funded -> Repaid -> Settled
+///   |          |
+///   v          v
+/// Cancelled  Defaulted (record only; repayment is still accepted afterwards)
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InvoiceStatus {
-    Active,
+    Listed,
     Funded,
     Repaid,
+    Settled,
+    Cancelled,
+    Defaulted,
 }
 
 #[contracttype]
@@ -14,18 +23,25 @@ pub struct Invoice {
     pub id: u64,
     pub seller: Address,
     pub investor: Option<Address>,
-    pub buyer_name: String,
-    pub amount: i128,
-    pub advance_amount: i128,
-    pub repayment_amount: i128,
+    /// Amount the investor pays the seller up front (settlement-token base units).
+    pub price: i128,
+    /// Amount the seller (or the debtor on their behalf) repays; >= price.
+    pub repayment: i128,
+    /// Unix timestamp (seconds) when repayment is due.
     pub due_date: u64,
+    /// SHA-256 of the invoice document. Unique across active invoices to block double financing.
+    pub doc_hash: BytesN<32>,
     pub status: InvoiceStatus,
-    pub metadata_uri: String,
+    pub created_at: u64,
+    pub funded_at: u64,
+    pub repaid_at: u64,
 }
 
 #[contracttype]
 #[derive(Clone)]
-pub enum InvoiceKey {
+pub enum DataKey {
+    Token,
+    NextId,
     Invoice(u64),
-    Registry,
+    DocHash(BytesN<32>),
 }

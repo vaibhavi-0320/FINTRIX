@@ -1,10 +1,8 @@
 import React, { Component, useEffect, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { getAddress } from "@stellar/freighter-api";
-import * as StellarSdk from "@stellar/stellar-sdk";
 import { LoadingScreen } from "./components/LoadingScreen";
 import Web3HeroLanding from "./components/Web3HeroLanding";
-import { FintrixAssistant, triggerChatNotification } from "./components/FintrixAssistant";
+import { FintrixAssistant } from "./components/FintrixAssistant";
 import DashboardView from "./components/DashboardView";
 import MarketplaceView from "./components/MarketplaceView";
 import DealDetailView from "./components/DealDetailView";
@@ -15,16 +13,17 @@ import WalletConnectModal from "./components/WalletConnectModal";
 import FundingSuccess from "./components/FundingSuccess";
 import RepaymentComplete from "./components/RepaymentComplete";
 import {
-  connectFreighterWallet,
-  connectManualWallet,
-  createInvoice,
   fundInvoiceOnBackend,
   getAccountBalance,
   getInvoices,
   repayInvoiceOnBackend,
+  restoreSession,
+  runChainAction,
+  signInWithWallet,
+  signOut,
 } from "./services/stellarService";
-import type { WalletProvider } from "./types";
-import { ConnectedWallet, Invoice } from "./types";
+import { resetAssistantConversation } from "./services/aiService";
+import type { ChainAction, ConnectedWallet, Invoice, WalletProvider } from "./types";
 import { useViewport } from "./hooks/useViewport";
 
 type AppView =
@@ -136,21 +135,13 @@ function Sidebar({
       }
 
       try {
-        const result = await getAddress().catch(() => ({ address: wallet }));
-        const address = result?.address || wallet;
-        if (!address) {
-          setWalletInfo(null);
-          return;
-        }
-
-        const server = new StellarSdk.Horizon.Server("https://horizon-testnet.stellar.org");
+        const address = wallet;
         let xlmBalance = "—";
         try {
-          const account = await server.loadAccount(address);
-          const native = account.balances.find((balance: any) => balance.asset_type === "native");
-          xlmBalance = native ? `${parseFloat(native.balance).toFixed(0)} XLM` : "0 XLM";
+          const balance = await getAccountBalance(address);
+          xlmBalance = balance > 0 ? `${balance.toFixed(0)} XLM` : "Not funded";
         } catch {
-          xlmBalance = "Not funded";
+          xlmBalance = "Unavailable";
         }
 
         setWalletInfo({
@@ -223,7 +214,7 @@ function Sidebar({
                   if (isMobile) setOpen(false);
                 }}
                 title={!open && !isMobile ? item.label : undefined}
-                style={{ display: "flex", alignItems: "center", gap: "0.75rem", padding: open || isMobile ? "0.625rem 0.875rem" : "0.625rem", borderRadius: "0.5rem", borderLeft: `2px solid ${active ? "#0066FF" : "transparent"}`, background: active ? "rgba(255,255,255,0.06)" : "transparent", color: active ? "#fff" : "rgba(255,255,255,0.38)", fontWeight: active ? 600 : 400, fontSize: "0.875rem", cursor: "pointer", border: "none", width: "100%", textAlign: "left", transition: "all 0.2s", whiteSpace: "nowrap", overflow: "hidden", justifyContent: open || isMobile ? "flex-start" : "center", fontFamily: "Inter, sans-serif" }}
+                style={{ display: "flex", alignItems: "center", gap: "0.75rem", padding: open || isMobile ? "0.625rem 0.875rem" : "0.625rem", borderRadius: "0.5rem", borderLeft: `2px solid ${active ? "#0066FF" : "transparent"}`, background: active ? "rgba(255,255,255,0.06)" : "transparent", color: active ? "#fff" : "rgba(255,255,255,0.38)", fontWeight: active ? 600 : 400, fontSize: "0.875rem", cursor: "pointer", borderTop: "none", borderRight: "none", borderBottom: "none", width: "100%", textAlign: "left", transition: "all 0.2s", whiteSpace: "nowrap", overflow: "hidden", justifyContent: open || isMobile ? "flex-start" : "center", fontFamily: "Inter, sans-serif" }}
               >
                 <span style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "24px", height: "24px", flexShrink: 0 }}>{item.icon}</span>
                 {(open || isMobile) && <span>{item.label}</span>}
@@ -304,6 +295,12 @@ export default function App() {
   }, [isMobile]);
 
   useEffect(() => {
+    restoreSession().then((restored) => {
+      if (restored) setWallet(restored);
+    });
+  }, []);
+
+  useEffect(() => {
     if (appView === "loading") {
       document.body.classList.add("loading-screen");
     } else {
@@ -315,7 +312,7 @@ export default function App() {
   useEffect(() => {
     const authViews: AppView[] = ["dashboard", "marketplace", "deal-detail", "simulation", "resources"];
     if (authViews.includes(appView)) {
-      getInvoices().then((data) => setInvoices(data ?? [])).catch((error) => console.warn("[Fintrix] getInvoices:", error));
+      void refreshInvoices();
     }
   }, [appView]);
 
@@ -324,8 +321,20 @@ export default function App() {
       setWalletBalance(0);
       return;
     }
-    getAccountBalance(wallet.publicKey).then(setWalletBalance).catch(() => setWalletBalance(0));
+    getAccountBalance().then(setWalletBalance).catch(() => setWalletBalance(0));
   }, [wallet?.publicKey]);
+
+  const refreshInvoices = async () => {
+    try {
+      const data = await getInvoices();
+      setInvoices(data);
+      setSelectedInvoice((current) => (current ? data.find((item) => item.id === current.id) ?? current : current));
+      return data;
+    } catch (error) {
+      console.warn("[Fintrix] getInvoices:", error);
+      return invoices;
+    }
+  };
 
   const showToast = (message: string) => setToast(message);
 
@@ -338,15 +347,23 @@ export default function App() {
     if (isMobile) {
       setSidebarOpen(false);
     }
+    if (view === "deal-detail" && !selectedInvoice) {
+      const firstOpen = invoices.find((invoice) => invoice.status === "active") ?? invoices.find((invoice) => invoice.status !== "draft");
+      if (!firstOpen) {
+        showToast("No deals yet. Upload an invoice in Simulation or check the Marketplace.");
+        setAppView("marketplace");
+        return;
+      }
+      setSelectedInvoice(firstOpen);
+    }
     setAppView(view);
   };
 
+  // Connecting a wallet signs the user in: the wallet signs a one-time server challenge.
   const handleConnect = async (provider: "freighter" | "albedo", publicKey?: string) => {
-    const connected = provider === "freighter"
-      ? await connectFreighterWallet()
-      : await connectManualWallet(provider as WalletProvider, publicKey);
+    const connected = await signInWithWallet(provider as WalletProvider, publicKey);
     setWallet(connected);
-    getAccountBalance(connected.publicKey).then(setWalletBalance).catch(() => setWalletBalance(0));
+    getAccountBalance().then(setWalletBalance).catch(() => setWalletBalance(0));
     showToast(`Connected: ${connected.publicKey.slice(0, 8)}...`);
     setAppView("dashboard");
   };
@@ -354,19 +371,28 @@ export default function App() {
   const handleLogout = () => {
     // FIX 1: clear all wallet-related state and storage, then notify user
     try {
+      void signOut();
+      resetAssistantConversation();
       setWallet(null);
       setWalletBalance(0);
+      setSelectedInvoice(null);
       setAppView("landing");
 
       // Clear any persisted wallet keys if present
-      try { localStorage.removeItem('walletAddress'); } catch {}
-      try { localStorage.removeItem('fintrix_wallet'); } catch {}
-      try { sessionStorage.clear(); } catch {}
+      try {
+        localStorage.removeItem('walletAddress');
+        localStorage.removeItem('fintrix_wallet');
+        sessionStorage.clear();
+      } catch {
+        // storage unavailable (private mode): nothing to clear
+      }
 
       // Show ephemeral disconnect notification (red) without changing existing Toast API
       const el = document.createElement('div');
       el.className = 'fixed top-5 right-5 z-[9999] flex items-center gap-2 px-4 py-3 rounded-lg bg-red-500/15 border border-red-500/40 text-red-400 text-sm font-medium shadow-lg';
-      el.innerHTML = `<span class="w-2 h-2 rounded-full bg-red-400"></span> Wallet disconnected`;
+      const dot = document.createElement("span");
+      dot.className = "w-2 h-2 rounded-full bg-red-400";
+      el.append(dot, document.createTextNode(" Wallet disconnected"));
       document.body.appendChild(el);
       setTimeout(() => { el.classList.add('opacity-0'); setTimeout(() => el.remove(), 300); }, 3000);
     } catch (err) {
@@ -399,67 +425,48 @@ export default function App() {
         return;
       }
 
-      const updatedInv = await fundInvoiceOnBackend(invoiceId, wallet.publicKey, wallet.provider, amount);
-      if (!updatedInv.txHash) {
-        throw new Error("Funding was not confirmed by Stellar. Please try again.");
-      }
-
-      const fundedAmount = amount ?? updatedInv.amount;
+      const updatedInv = await fundInvoiceOnBackend(invoiceId, wallet);
+      const fundedAmount = updatedInv.dto?.terms.price ?? amount ?? updatedInv.amount;
       showToast("Transaction confirmed on-chain!");
-      setChatNotification(`Invoice ${invoiceId} was successfully funded! Transaction hash: ${updatedInv.txHash}.`);
-      const updatedList = await getInvoices().catch(() => invoices);
-      setInvoices(updatedList ?? []);
+      setChatNotification(`Invoice ${updatedInv.dto?.invoiceNumber ?? invoiceId} was funded on-chain. Transaction hash: ${updatedInv.txHash}.`);
+      await refreshInvoices();
+      setSelectedInvoice(updatedInv);
       setLastFundedInvoice(updatedInv);
       setLastFundedAmount(fundedAmount);
       return updatedInv;
-    } catch (error: any) {
-      console.error("[Fintrix] handleFund error:", error);
-      showToast(`Funding failed: ${error.message}`);
+    } catch (error) {
+      showToast(`Funding failed: ${error instanceof Error ? error.message : String(error)}`);
       throw error;
     }
   };
 
-  const handleCreateInvoice = async (data: { amount: string; dueDate: string; buyer: string; invoiceId: string; companyName: string; industry: string; country: string }) => {
-    const created = await createInvoice({
-      amount: parseFloat(data.amount) || 0,
-      due: data.dueDate,
-      buyer: data.buyer,
-      number: data.invoiceId,
-      discount: 8,
-      seller: wallet?.publicKey ?? "demo",
-      notes: "",
-      companyName: data.companyName,
-      industry: data.industry,
-      country: data.country,
-    });
-    setInvoices((prev) => [created, ...prev]);
-    setSelectedInvoice(created);
-    triggerChatNotification(
-      "AI Verification complete for this invoice. Risk Level: LOW. Trust Score: 82/100. " +
-      "Key indicators: Fixed repayment timeline, Tier-1 supplier, short-term exposure only. " +
-      "Invoice is marketplace-ready."
-    );
-    return created;
-  };
-
-  void handleCreateInvoice;
 
   const handleViewDetail = (invoiceId: string) => {
     setSelectedInvoice(invoices.find((invoice) => invoice.id === invoiceId) ?? null);
     setAppView("deal-detail");
   };
 
+  /** Seller repays into escrow (on-chain), then the repayment summary screen is shown. */
   const handleRepay = async (invoiceId: string) => {
-    await repayInvoiceOnBackend(invoiceId);
-    showToast("Repayment complete!");
-    const updated = await getInvoices().catch(() => invoices);
-    setInvoices(updated ?? []);
-    const invoice = invoices.find((item) => item.id === invoiceId);
-    if (invoice) setLastFundedInvoice(invoice);
+    if (!wallet) return;
+    const repaid = await repayInvoiceOnBackend(invoiceId, wallet);
+    showToast("Repayment confirmed on-chain!");
+    await refreshInvoices();
+    setLastFundedInvoice(repaid);
+    setLastFundedAmount(repaid.dto?.terms.price ?? repaid.amount);
     setAppView("repayment");
+    return repaid;
   };
 
-  void handleRepay;
+  /** Other on-chain actions from the deal page (claim, cancel, mark defaulted, list). */
+  const handleChainAction = async (invoiceId: string, action: ChainAction) => {
+    if (!wallet) throw new Error("Connect your wallet first.");
+    const result = await runChainAction(invoiceId, action, wallet);
+    await refreshInvoices();
+    if (result.invoice) setSelectedInvoice(result.invoice);
+    showToast("Transaction confirmed on-chain!");
+    return result;
+  };
 
   if (appView === "loading") {
     return (
@@ -479,16 +486,14 @@ export default function App() {
           setWalletAddress={() => {}}
           onProviderConnected={async (provider, address) => {
             try {
-              const connected = provider === "freighter"
-                ? await connectFreighterWallet()
-                : await connectManualWallet(provider as WalletProvider, address);
+              const connected = await signInWithWallet(provider as WalletProvider, address);
               setWallet(connected);
-              getAccountBalance(connected.publicKey).then(setWalletBalance).catch(() => setWalletBalance(0));
+              getAccountBalance().then(setWalletBalance).catch(() => setWalletBalance(0));
               showToast(`Connected: ${connected.publicKey.slice(0, 8)}...`);
               setShowWalletModal(false);
               setAppView("dashboard");
-            } catch (error: any) {
-              showToast(error?.message || "Wallet connection failed");
+            } catch (error) {
+              showToast(error instanceof Error ? error.message : "Wallet connection failed");
             }
           }}
         />
@@ -503,7 +508,7 @@ export default function App() {
     return (
       <ErrorBoundary>
         <FundingSuccess
-          invoice={lastFundedInvoice ? { buyer: lastFundedInvoice.buyer, amount: lastFundedInvoice.amount, duration: 45, txId: lastFundedInvoice.txHash } : null}
+          invoice={lastFundedInvoice ? { buyer: lastFundedInvoice.buyer, amount: lastFundedInvoice.amount, duration: Math.max(0, Math.ceil((Date.parse(`${lastFundedInvoice.due}T23:59:59Z`) - Date.now()) / 86_400_000)), txId: lastFundedInvoice.txHash } : null}
           amountInvested={lastFundedAmount}
           onViewInvestment={() => setAppView("deal-detail")}
           onExploreMore={() => setAppView("marketplace")}
@@ -517,7 +522,7 @@ export default function App() {
     return (
       <ErrorBoundary>
         <RepaymentComplete
-          invoice={lastFundedInvoice ? { buyer: lastFundedInvoice.buyer, amount: lastFundedInvoice.amount, txId: `0x${Math.random().toString(16).slice(2, 8)}...`, completedDate: new Date().toISOString().split("T")[0] } : null}
+          invoice={lastFundedInvoice ? { buyer: lastFundedInvoice.buyer, amount: lastFundedInvoice.amount, txId: lastFundedInvoice.txHash, completedDate: (lastFundedInvoice.dto?.timestamps.repaidAt ?? new Date().toISOString()).split("T")[0] } : null}
           amountInvested={lastFundedAmount}
           onReinvest={() => setAppView("marketplace")}
           onViewDetails={() => setAppView("deal-detail")}
@@ -573,6 +578,9 @@ export default function App() {
               invoice={selectedInvoice}
               wallet={wallet?.publicKey ?? null}
               onFund={async (id, amount) => handleFund(id, amount)}
+              onRepay={handleRepay}
+              onChainAction={handleChainAction}
+              walletProvider={wallet?.provider ?? null}
               onBack={() => setAppView("marketplace")}
               sidebarOpen={isMobile ? false : sidebarOpen}
             />
@@ -583,6 +591,12 @@ export default function App() {
               invoices={invoices}
               sidebarOpen={isMobile ? false : sidebarOpen}
               walletAddress={wallet?.publicKey ?? null}
+              wallet={wallet}
+              onInvoiceListed={(invoice) => {
+                void refreshInvoices();
+                setSelectedInvoice(invoice);
+                showToast("Invoice listed on-chain!");
+              }}
             />
           )}
 

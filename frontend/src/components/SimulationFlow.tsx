@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { Calculator, TrendingUp } from "lucide-react";
-import type { Invoice } from "../types";
-import { checkFreighter, buildSimulationTransaction } from "../services/stellarTransactions";
+import type { ConnectedWallet, Invoice } from "../types";
+import { simulateOnTestnet } from "../services/stellarService";
 import { useViewport } from "../hooks/useViewport";
 import { InvoiceUploader } from "./InvoiceUploader";
 
@@ -9,6 +9,8 @@ interface SimulationFlowProps {
   invoices: Invoice[];
   sidebarOpen: boolean;
   walletAddress?: string | null;
+  wallet?: ConnectedWallet | null;
+  onInvoiceListed?: (invoice: Invoice) => void;
 }
 
 const XLM_USD = 0.11;
@@ -24,7 +26,7 @@ function daysUntil(date: string) {
   return Math.max(1, Math.ceil(ms / 86_400_000));
 }
 
-function FinancingJourney({ isMobile }: { isMobile: boolean }) {
+function FinancingJourney({ isMobile, wallet, onInvoiceListed }: { isMobile: boolean; wallet?: ConnectedWallet | null; onInvoiceListed?: (invoice: Invoice) => void }) {
   const [activeStep, setActiveStep] = useState(1);
   const step = JOURNEY_STEPS.find((item) => item.id === activeStep)!;
 
@@ -52,9 +54,10 @@ function FinancingJourney({ isMobile }: { isMobile: boolean }) {
           </div>
           {activeStep === 1 && (
             <InvoiceUploader
-              onParsed={(data) => {
-                console.log("[JOURNEY] Invoice parsed:", data);
-                window.setTimeout(() => setActiveStep(2), 1000);
+              wallet={wallet}
+              onListed={(invoice) => {
+                onInvoiceListed?.(invoice);
+                window.setTimeout(() => setActiveStep(3), 1000);
               }}
             />
           )}
@@ -81,17 +84,17 @@ function FinancingJourney({ isMobile }: { isMobile: boolean }) {
   );
 }
 
-export default function SimulationFlow({ invoices, sidebarOpen, walletAddress }: SimulationFlowProps) {
+export default function SimulationFlow({ invoices, sidebarOpen, walletAddress, wallet, onInvoiceListed }: SimulationFlowProps) {
   const { isMobile, isTablet } = useViewport();
   const deals = useMemo(() => invoices.filter((invoice) => invoice.status === "active").map((invoice) => ({ id: invoice.id, company: invoice.companyName || invoice.buyer, apy: invoice.yield || invoice.discount || 0, durationDays: daysUntil(invoice.due), repaymentDate: invoice.due, amount: invoice.amount })), [invoices]);
   const [amount, setAmount] = useState<number>(1000);
-  const [selectedDeal, setSelectedDeal] = useState<any>(deals[0] || null);
+  const [selectedDeal, setSelectedDeal] = useState<(typeof deals)[number] | null>(deals[0] || null);
   const [simLoading, setSimLoading] = useState(false);
   const [simError, setSimError] = useState<string | null>(null);
-  const [simResult, setSimResult] = useState<any>(null);
+  const [simResult, setSimResult] = useState<Awaited<ReturnType<typeof simulateOnTestnet>> | null>(null);
 
   const apy = selectedDeal?.apy || 0;
-  const durationDays = selectedDeal?.durationDays || selectedDeal?.duration || 180;
+  const durationDays = selectedDeal?.durationDays || 180;
   const estimatedReturn = parseFloat((amount * (apy / 100) * (durationDays / 365)).toFixed(2));
   const totalReceived = amount + estimatedReturn;
   const xlmEquivalent = (totalReceived / XLM_USD).toFixed(2);
@@ -109,42 +112,14 @@ export default function SimulationFlow({ invoices, sidebarOpen, walletAddress }:
     setSimError(null);
     setSimResult(null);
     try {
-      // Step 1: Verify Freighter is connected
-      const publicKey = await checkFreighter();
-
-      // Step 2: Convert USD amount to XLM (rough conversion for testnet)
-      const xlmAmount = (amount / 0.11).toFixed(7);
-
-      // Step 3: Build + sign + submit — Freighter popup opens HERE
-      const result = await buildSimulationTransaction({
-        publicKey,
-        amountXLM: xlmAmount,
-        dealId: selectedDeal.id,
-      });
-
-      // Step 4: Format result for display
-      const shortHash = result.txHash.substring(0, 10);
-      const simId = `SIM-${shortHash.toUpperCase()}`;
-      const expectedReturn = parseFloat(
-        (amount * ((selectedDeal.apy || 0) / 100) * (durationDays / 365)).toFixed(2)
-      );
-
-      setSimResult({
-        simId,
-        txHash: result.txHash,
-        explorerUrl: result.explorerUrl,
-        amountUSD: amount,
-        expectedReturn,
-        maturityDate: selectedDeal.repaymentDate,
-      });
-
-      // Fix 4: Increment simulations run counter on successful simulation
-      const current = parseInt(localStorage.getItem('simulationsRun') || '0', 10);
-      localStorage.setItem('simulationsRun', String(current + 1));
-
-    } catch (error: any) {
-      console.error('Simulation failed:', error);
-      setSimError(error.message || "Simulation failed");
+      if (!wallet) throw new Error("Connect your wallet first.");
+      const expectedReturn = parseFloat((amount * ((selectedDeal.apy || 0) / 100) * (durationDays / 365)).toFixed(2));
+      // Signs a 1 XLM payment to your own account (memo = deal reference) and waits for the
+      // network to confirm it. It records the projection on-chain; nothing is invested.
+      const result = await simulateOnTestnet(wallet, { id: selectedDeal.id, company: selectedDeal.company }, amount, expectedReturn, selectedDeal.repaymentDate);
+      setSimResult(result);
+    } catch (error) {
+      setSimError(error instanceof Error ? error.message : "Simulation failed");
     } finally {
       setSimLoading(false);
     }
@@ -165,7 +140,7 @@ export default function SimulationFlow({ invoices, sidebarOpen, walletAddress }:
 
       <main style={{ padding: isMobile ? "5.25rem 1rem 5.5rem" : "7rem 2.5rem 3rem", maxWidth: "1180px", margin: "0 auto" }}>
         <div id="simulation-page">
-          <FinancingJourney isMobile={isMobile} />
+          <FinancingJourney isMobile={isMobile} wallet={wallet} onInvoiceListed={onInvoiceListed} />
           <div id="simulator-section">
             <div style={{ display: "grid", gridTemplateColumns: isTablet ? "1fr" : "minmax(0, 0.9fr) minmax(340px, 0.65fr)", gap: "2rem", alignItems: "start" }}>
               <section style={{ ...panelStyle, padding: "2rem" }}>

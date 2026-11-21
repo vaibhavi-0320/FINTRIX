@@ -1,6 +1,5 @@
 import React, { useState } from "react";
-import { getAddress, isConnected, requestAccess } from "@stellar/freighter-api";
-import { Keypair } from "stellar-sdk";
+import { getWallet, WalletError } from "../lib/wallet";
 import type { WalletProvider } from "../types";
 import { useViewport } from "../hooks/useViewport";
 
@@ -11,66 +10,31 @@ interface WalletConnectModalProps {
   onProviderConnected?: (provider: WalletProvider, address: string) => void;
 }
 
-async function connectFreighter(
+/** Connects through the shared wallet layer (official Freighter / Albedo libraries, network check). */
+async function connectWith(
+  provider: "freighter" | "albedo",
   onClose: () => void,
   setWallet: (key: string) => void,
   onProviderConnected?: (provider: WalletProvider, address: string) => void,
 ) {
   try {
-    const connected = await isConnected();
-    if (!connected?.isConnected) {
+    const address = await getWallet(provider).connect();
+    setWallet(address);
+    onProviderConnected?.(provider, address);
+    onClose();
+  } catch (err) {
+    if (err instanceof WalletError && err.code === "not_installed") {
       alert("Freighter is not installed. Get it at https://freighter.app");
       return;
     }
-
-    await requestAccess();
-    const { address, error } = await getAddress();
-    if (error || !address) {
-      throw new Error(error?.message ?? "Freighter did not return a public key.");
-    }
-
-    setWallet(address);
-    onProviderConnected?.("freighter", address);
-    onClose();
-  } catch (err) {
-    console.error("Freighter error:", err);
-    alert("Freighter connection failed or was cancelled.");
+    alert(err instanceof Error ? err.message : `${provider === "albedo" ? "Albedo" : "Freighter"} connection failed or was cancelled.`);
   }
 }
 
-async function connectAlbedo(
-  onClose: () => void,
-  setWallet: (key: string) => void,
-  onProviderConnected?: (provider: WalletProvider, address: string) => void,
-) {
-  try {
-    const token = "fintrix-" + Date.now();
-    const intentUrl = `https://albedo.link/intent/public_key?token=${token}&callback=postMessage`;
-    const popup = window.open(intentUrl, "albedo", "width=500,height=600");
-
-    const handleMessage = (event: MessageEvent) => {
-      if (event.origin !== "https://albedo.link") return;
-      const { pubkey, error } = event.data ?? {};
-      if (error) {
-        alert("Albedo error: " + error);
-        window.removeEventListener("message", handleMessage);
-        return;
-      }
-      if (pubkey) {
-        setWallet(pubkey);
-        onProviderConnected?.("albedo", pubkey);
-        window.removeEventListener("message", handleMessage);
-        popup?.close();
-        onClose();
-      }
-    };
-
-    window.addEventListener("message", handleMessage);
-  } catch (err) {
-    console.error("Albedo error:", err);
-    alert("Albedo connection failed. Please try again.");
-  }
-}
+const connectFreighter = (onClose: () => void, setWallet: (key: string) => void, onProviderConnected?: (provider: WalletProvider, address: string) => void) =>
+  connectWith("freighter", onClose, setWallet, onProviderConnected);
+const connectAlbedo = (onClose: () => void, setWallet: (key: string) => void, onProviderConnected?: (provider: WalletProvider, address: string) => void) =>
+  connectWith("albedo", onClose, setWallet, onProviderConnected);
 
 function createNewWallet() {
   window.open("https://freighter.app", "_blank");

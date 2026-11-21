@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { getAddress, isConnected, requestAccess } from "@stellar/freighter-api";
+import { getWallet, WalletError } from "../lib/wallet";
 import { useViewport } from "../hooks/useViewport";
 
 interface WalletSelectorProps {
@@ -10,7 +10,7 @@ interface WalletSelectorProps {
 export default function WalletSelector({ onConnect, onClose }: WalletSelectorProps) {
   const [busy, setBusy] = useState<"freighter" | "albedo" | null>(null);
   const [albedoKey, setAlbedoKey] = useState("");
-  const [showAlbedoInput, setShowAlbedoInput] = useState(false);
+  const [showAlbedoInput] = useState(false);
   const [error, setError] = useState("");
   const { isMobile } = useViewport();
 
@@ -18,32 +18,26 @@ export default function WalletSelector({ onConnect, onClose }: WalletSelectorPro
     setBusy("freighter");
     setError("");
     try {
-      // quick presence check for Freighter extension
+      let address: string;
       try {
-        const status = await isConnected();
-        if (!status || !status.isConnected) {
+        address = await getWallet("freighter").connect();
+      } catch (connectError) {
+        if (connectError instanceof WalletError && connectError.code === "not_installed") {
           alert("Freighter extension is not installed. Please install it from https://freighter.app");
           setBusy(null);
           return;
         }
-      } catch (_) {
-        // if the check itself fails, continue and let the service handle the error
-      }
-
-      await requestAccess();
-      const { address, error } = await getAddress();
-      if (error || !address) {
-        throw new Error(error?.message ?? "No public key returned from Freighter.");
+        throw connectError;
       }
       await onConnect("freighter", address);
-    } catch (e: any) {
-      const msg = e?.message ?? String(e);
+    } catch (e: unknown) {
+      const msg = (e as Error | undefined)?.message ?? String(e);
       if (msg.toLowerCase().includes("cancel") || msg.toLowerCase().includes("reject") || msg.toLowerCase().includes("decli")) {
         alert("Connection cancelled by user.");
       } else {
         alert("Failed to connect Freighter wallet. Please try again.");
       }
-      setError(e?.message ?? "Failed to connect Freighter. Make sure the extension is installed.");
+      setError((e as Error | undefined)?.message ?? "Failed to connect Freighter. Make sure the extension is installed.");
     } finally {
       setBusy(null);
     }
@@ -54,72 +48,20 @@ export default function WalletSelector({ onConnect, onClose }: WalletSelectorPro
     if (!showAlbedoInput) {
       try {
         setBusy("albedo");
-        const intentUrl = `https://albedo.link/intent/public_key?token=fintrix-${Date.now()}&callback=postMessage`;
-        const popup = window.open(intentUrl, "albedo", "width=500,height=600");
-
-        if (!popup) {
-          throw new Error("Popup blocked");
-        }
-
-        await new Promise<void>((resolve, reject) => {
-          let settled = false;
-
-          const cleanup = () => {
-            window.removeEventListener("message", handleMessage);
-            clearInterval(popupCheck);
-            if (!popup.closed) {
-              popup.close();
-            }
-            setBusy(null);
-          };
-
-          const handleMessage = async (event: MessageEvent) => {
-            if (event.origin !== "https://albedo.link" || settled) return;
-
-            const { pubkey, error } = (event.data ?? {}) as { pubkey?: string; error?: string };
-
-            if (error) {
-              settled = true;
-              cleanup();
-              alert("Albedo connection failed: " + error);
-              reject(new Error(error));
-              return;
-            }
-
-            if (pubkey) {
-              settled = true;
-              cleanup();
-              try {
-                await onConnect("albedo", pubkey);
-                resolve();
-              } catch (connectError) {
-                reject(connectError);
-              }
-            }
-          };
-
-          const popupCheck = window.setInterval(() => {
-            if (!popup.closed || settled) return;
-            settled = true;
-            cleanup();
-            reject(new Error("Connection cancelled by user."));
-          }, 500);
-
-          window.addEventListener("message", handleMessage);
-        });
-
-        return;
-      } catch (err: any) {
-        const errStr = String(err || "").toLowerCase();
-        if (errStr.includes("cancel") || errStr.includes("user")) {
+        const pubkey = await getWallet("albedo").connect();
+        await onConnect("albedo", pubkey);
+      } catch (err: unknown) {
+        const msg = (err as Error | undefined)?.message ?? String(err);
+        if (/cancel|reject|declin|closed/i.test(msg)) {
           alert("Connection cancelled by user.");
         } else {
-          console.error("Albedo connection error:", err);
           alert("Failed to connect Albedo. Please try again.");
         }
+        setError(msg);
+      } finally {
         setBusy(null);
-        return;
       }
+      return;
     }
 
     if (!albedoKey.trim()) {
@@ -131,14 +73,14 @@ export default function WalletSelector({ onConnect, onClose }: WalletSelectorPro
     setError("");
     try {
       await onConnect("albedo", albedoKey.trim());
-    } catch (e: any) {
-      const msg = e?.message ?? String(e);
+    } catch (e: unknown) {
+      const msg = (e as Error | undefined)?.message ?? String(e);
       if (msg.toLowerCase().includes("cancel") || msg.toLowerCase().includes("reject")) {
         alert("Connection cancelled by user.");
       } else {
         alert("Failed to connect Albedo wallet. Please try again.");
       }
-      setError(e?.message ?? "Failed to connect Albedo.");
+      setError((e as Error | undefined)?.message ?? "Failed to connect Albedo.");
     } finally {
       setBusy(null);
     }
