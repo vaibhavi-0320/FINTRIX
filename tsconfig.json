@@ -20,7 +20,6 @@
   },
   "include": [
     "backend/**/*.ts",
-    "api/**/*.ts",
     "tests/**/*.ts",
     "scripts/**/*.mts",
     "ml/**/*.mts"

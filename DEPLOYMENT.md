@@ -17,7 +17,7 @@
 ## How the build works
 `vercel.json` runs `npm run build:vercel`, which:
 1. builds the frontend with Vite,
-2. bundles `api/index.ts` with esbuild (ESM, Node 22),
+2. bundles `backend/vercel-entry.ts` with esbuild (kept out of `api/` so Vercel doesn't auto-build over it) (ESM, Node 22),
 3. traces the remaining runtime files (pdf.js, tesseract) with `@vercel/nft`,
 4. copies `knowledge/`, migrations and the risk model next to the function,
 5. writes `.vercel/output/config.json`: `/api/*` goes to the function, SPA fallback to `index.html`, security headers, immutable caching for `/assets/*`.

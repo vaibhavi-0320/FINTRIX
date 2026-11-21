@@ -23,7 +23,7 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ["backend/**/*.ts", "api/**/*.ts"],
+    files: ["backend/**/*.ts"],
     languageOptions: { globals: globals.node },
   },
   {

@@ -48,7 +48,7 @@
 
 ## Repository layout
 ```
-api/index.ts                    Vercel entry (exports the Express app)
+backend/vercel-entry.ts        Vercel entry (exports the Express app)
 backend/
   app.ts                        all routes
   config.ts                     validated environment (zod), network presets

@@ -33,7 +33,7 @@ function requestDomain(req: Request) {
 
 /**
  * The Fintrix API. Mounted by the local server (backend/dev-server.ts) and exported
- * as the Vercel serverless function (api/index.ts).
+ * as the Vercel serverless function (backend/vercel-entry.ts).
  */
 export function createApp() {
   const config = getConfig();

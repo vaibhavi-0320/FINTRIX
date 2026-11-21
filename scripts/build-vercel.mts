@@ -39,7 +39,7 @@ console.log("2/5 bundling API");
 fs.mkdirSync(funcDir, { recursive: true });
 const bundle = path.join(funcDir, "index.mjs");
 await build({
-  entryPoints: [path.join(root, "api", "index.ts")],
+  entryPoints: [path.join(root, "backend", "vercel-entry.ts")],
   outfile: bundle,
   bundle: true,
   platform: "node",

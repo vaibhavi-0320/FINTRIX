@@ -7,7 +7,7 @@ category: technical
 ## Components
 
 - **Web app (frontend):** React 19 single-page app built with Vite and Tailwind CSS. It keeps the current screen in React state (no URL routing) and talks to the API over HTTPS on the same origin. It connects to the Freighter browser wallet for signing.
-- **API (backend):** A Node.js Express application. Locally it is served by `backend/dev-server.ts` together with the web app; on Vercel the same app runs as one serverless function (`api/index.ts`).
+- **API (backend):** A Node.js Express application. Locally it is served by `backend/dev-server.ts` together with the web app; on Vercel the same app runs as one serverless function (`backend/vercel-entry.ts`).
 - **Database:** PostgreSQL with the pgvector extension. In local development and automated tests Fintrix uses PGlite, an embedded build of Postgres, so no database server is needed. Production uses a hosted Postgres (for example Neon or Supabase) through `DATABASE_URL`. Schema changes are SQL migrations applied automatically at startup.
 - **Smart contract:** A Soroban (Rust) contract, `fintrix-escrow`, deployed on Stellar testnet. It records invoices, moves the settlement token for funding, escrows repayments and pays out claims.
 - **Stellar access:** The backend uses Stellar RPC to simulate and submit contract transactions and to read contract state, and Horizon to read account balances and history.
